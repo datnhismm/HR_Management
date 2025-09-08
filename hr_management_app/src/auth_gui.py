@@ -228,5 +228,15 @@ class AuthWindow(tk.Tk):
         else:
             messagebox.showerror("Failed", "Token invalid or expired.", parent=self)
 
+    def center_window(self):
+        self.update_idletasks()
+        w = self.winfo_width() or 380
+        h = self.winfo_height() or 240
+        ws = self.winfo_screenwidth()
+        hs = self.winfo_screenheight()
+        x = (ws // 2) - (w // 2)
+        y = (hs // 2) - (h // 2)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+
 if __name__ == "__main__":
     AuthWindow().mainloop()
