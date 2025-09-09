@@ -7,20 +7,21 @@ from database.database import (
     calculate_salary,
 )
 import sys
+import logging
 
-# attendance function names differ between versions; try common names then fallback
+logger = logging.getLogger(__name__)
+
+# attendance functions (use the stable names available in database.database)
 try:
-    from database.database import check_in, check_out
-except Exception:
-    try:
-        from database.database import record_check_in as check_in, record_check_out as check_out
-    except Exception:
-        # define no-op fallbacks that raise clear errors if called
-        def check_in(employee_id):
-            raise RuntimeError("No check_in function available in database.database")
+    from database.database import record_check_in as check_in, record_check_out as check_out
+except Exception as exc:
+    logger.exception("Attendance functions not available: %s", exc)
 
-        def check_out(employee_id):
-            raise RuntimeError("No check_out function available in database.database")
+    def check_in(employee_id):
+        raise RuntimeError("No check_in function available in database.database")
+
+    def check_out(employee_id):
+        raise RuntimeError("No check_out function available in database.database")
 
 
 def add_contract():
@@ -34,6 +35,7 @@ def add_contract():
         add_contract_to_db(contract)
         print("Contract added successfully!\n")
     except Exception as e:
+        logger.exception("Error adding contract: %s", e)
         print(f"Error adding contract: {e}")
 
 
@@ -62,6 +64,7 @@ def attendance_menu():
         else:
             print("Invalid option.")
     except Exception as e:
+        logger.exception("Attendance error: %s", e)
         print(f"Attendance error: {e}")
 
 
@@ -74,6 +77,7 @@ def salary_menu():
         salary = calculate_salary(employee_id, start_date, end_date, hourly_wage)
         print(f"Salary for employee {employee_id} from {start_date} to {end_date}: {salary:.2f}")
     except Exception as e:
+        logger.exception("Error calculating salary: %s", e)
         print(f"Error calculating salary: {e}")
 
 
@@ -116,6 +120,7 @@ if __name__ == "__main__":
     try:
         from auth_gui import AuthWindow
     except Exception as e:
+        logger.exception("Failed to import auth GUI: %s", e)
         print(f"Failed to import auth GUI: {e}")
         print("If you want to use the CLI, run: python main.py cli")
         sys.exit(1)

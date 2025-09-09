@@ -1,5 +1,7 @@
 from dataclasses import dataclass, asdict
-import sqlite3
+from typing import Optional, List, Dict
+
+from database.database import _conn
 from typing import Optional, List, Dict
 
 DB_NAME = "hr_management.db"
@@ -17,11 +19,15 @@ class Contract:
 
     def save(self) -> None:
         """Insert or update this contract into the DB."""
-        with sqlite3.connect(DB_NAME) as conn:
+        # ensure employee exists before saving the contract
+        from database.database import get_employee_by_id
+        if get_employee_by_id(int(self.employee_id)) is None:
+            raise ValueError(f"Employee id {self.employee_id} does not exist; cannot save contract.")
+        with _conn() as conn:
             c = conn.cursor()
             c.execute(
                 "INSERT OR REPLACE INTO contracts (id, employee_id, start_date, end_date, terms) VALUES (?, ?, ?, ?, ?)",
-                (self.id, self.employee_id, self.start_date, self.end_date, self.terms),
+                (self.id, int(self.employee_id), self.start_date, self.end_date, self.terms),
             )
 
     # backward-compatible alias
@@ -31,13 +37,13 @@ class Contract:
     def update_contract(self, new_terms: str) -> None:
         """Update contract terms both in object and DB."""
         self.terms = new_terms
-        with sqlite3.connect(DB_NAME) as conn:
+        with _conn() as conn:
             c = conn.cursor()
             c.execute("UPDATE contracts SET terms = ? WHERE id = ?", (new_terms, self.id))
 
     def delete(self) -> None:
         """Delete this contract from DB."""
-        with sqlite3.connect(DB_NAME) as conn:
+        with _conn() as conn:
             c = conn.cursor()
             c.execute("DELETE FROM contracts WHERE id = ?", (self.id,))
 
@@ -51,7 +57,7 @@ class Contract:
 
     @classmethod
     def retrieve_contract(cls, id: int) -> Optional["Contract"]:
-        with sqlite3.connect(DB_NAME) as conn:
+        with _conn() as conn:
             c = conn.cursor()
             c.execute("SELECT id, employee_id, start_date, end_date, terms FROM contracts WHERE id = ?", (id,))
             row = c.fetchone()
@@ -59,7 +65,7 @@ class Contract:
 
     @classmethod
     def all_contracts(cls) -> List["Contract"]:
-        with sqlite3.connect(DB_NAME) as conn:
+        with _conn() as conn:
             c = conn.cursor()
             c.execute("SELECT id, employee_id, start_date, end_date, terms FROM contracts")
             rows = c.fetchall()

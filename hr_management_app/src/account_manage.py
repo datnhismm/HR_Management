@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
-from database.database import get_all_users, update_user_role, delete_user
+from database.database import get_all_users, update_user_role, delete_user, ALLOWED_ROLES, can_grant_role
 
 class UserManagementWindow(tk.Toplevel):
     def __init__(self, parent):
@@ -47,11 +47,21 @@ class UserManagementWindow(tk.Toplevel):
             messagebox.showerror("Error", "User data is incomplete.")
             return
         user_id, email, role = user
-        new_role = simpledialog.askstring("Edit Role", f"Enter new role for {email}:", initialvalue=role, parent=self)
-        if new_role and new_role != role:
-            update_user_role(user_id, new_role)
+        allowed = [r for r in ALLOWED_ROLES if can_grant_role(self.parent.user_role, r)]
+        if not allowed:
+            messagebox.showerror("Permission Denied", "You cannot grant any roles.", parent=self)
+            return
+
+        from ui_helpers import role_selection_dialog
+        new_role = role_selection_dialog(self, email, role, allowed)
+        if not new_role:
+            return
+        try:
+            update_user_role(int(user_id), new_role)
             self.load_users()
             messagebox.showinfo("Role Updated", f"Role for {email} updated to {new_role}.")
+        except Exception as e:
+            messagebox.showerror("Error", str(e), parent=self)
 
     def delete_user(self):
         selected = self.tree.selection()
@@ -64,6 +74,6 @@ class UserManagementWindow(tk.Toplevel):
             return
         user_id, email, role = user
         if messagebox.askyesno("Delete User", f"Are you sure you want to delete {email}?"):
-            delete_user(user_id)
+            delete_user(int(user_id))
             self.load_users()
             messagebox.showinfo("User Deleted", f"User {email} deleted.")

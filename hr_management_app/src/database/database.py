@@ -4,11 +4,18 @@ import hashlib
 import secrets
 import smtplib
 import random
-from datetime import datetime, timedelta, date
+import logging
+from datetime import datetime, timedelta, date, timezone
 from email.message import EmailMessage
 from typing import List, Tuple, Optional
 
 DB_NAME = "hr_management.db"
+
+# module logger
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    # basic configuration (can be overridden by application)
+    logging.basicConfig(level=logging.INFO)
 
 def _conn():
     """Return sqlite connection located next to this module."""
@@ -105,7 +112,8 @@ def create_user(email: str, password: str, role: str = "engineer") -> int:
             c.execute("INSERT INTO users (email, password_hash, salt, role) VALUES (?, ?, ?, ?)",
                       (email, pwd_hash, salt.hex(), role))
             conn.commit()
-            return c.lastrowid
+            lid = c.lastrowid
+            return int(lid) if lid is not None else 0
     except sqlite3.IntegrityError as ie:
         raise ValueError("Email already registered") from ie
     except Exception as exc:
@@ -134,7 +142,7 @@ def verify_user(email: str, password: str) -> bool:
 
 def create_reset_token(email: str, hours_valid: int = 1) -> str:
     token = secrets.token_urlsafe(32)
-    expiry = (datetime.utcnow() + timedelta(hours=hours_valid)).isoformat()
+    expiry = (datetime.now(timezone.utc) + timedelta(hours=hours_valid)).isoformat()
     with _conn() as conn:
         c = conn.cursor()
         c.execute("UPDATE users SET reset_token = ?, reset_expiry = ? WHERE email = ?", (token, expiry, email.strip().lower()))
@@ -142,7 +150,7 @@ def create_reset_token(email: str, hours_valid: int = 1) -> str:
     return token
 
 def reset_password_with_token(token: str, new_password: str) -> bool:
-    now_iso = datetime.utcnow().isoformat()
+    now_dt = datetime.now(timezone.utc)
     with _conn() as conn:
         c = conn.cursor()
         c.execute("SELECT id, email, reset_expiry FROM users WHERE reset_token = ?", (token,))
@@ -150,7 +158,15 @@ def reset_password_with_token(token: str, new_password: str) -> bool:
         if not row:
             return False
         _, _, reset_expiry = row
-        if reset_expiry is None or reset_expiry < now_iso:
+        if reset_expiry is None:
+            return False
+        try:
+            expiry_dt = datetime.fromisoformat(reset_expiry)
+        except Exception:
+            # malformed expiry value; deny reset
+            logger.warning("Malformed reset_expiry for token: %s", token)
+            return False
+        if expiry_dt < now_dt:
             return False
         salt = os.urandom(16)
         pwd_hash = _hash_password(new_password, salt)
@@ -166,9 +182,15 @@ def send_email(to_email: str, subject: str, body: str) -> None:
     Raises RuntimeError with a helpful message on failure.
     """
     try:
-        from email_config import SMTP_SERVER, SMTP_PORT, SMTP_USE_SSL, SMTP_USER, SMTP_PASSWORD, FROM_EMAIL
+        from email_config import SMTP_SERVER, SMTP_PORT, SMTP_USE_SSL, SMTP_USER, SMTP_PASSWORD, FROM_EMAIL, SMTP_CONFIGURED
     except Exception as e:
+        logger.exception("Failed to import email_config: %s", e)
         raise RuntimeError("Missing or invalid email_config.py in src/ — create it with SMTP settings.") from e
+
+    # If SMTP isn't configured (development), skip sending and log.
+    if not SMTP_CONFIGURED:
+        logger.info("SMTP not configured; skipping send to %s", to_email)
+        return
 
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -191,11 +213,13 @@ def send_email(to_email: str, subject: str, body: str) -> None:
                     smtp.login(SMTP_USER, SMTP_PASSWORD)
                 smtp.send_message(msg)
     except smtplib.SMTPAuthenticationError as ex:
+        logger.exception("SMTP auth failed: %s", ex)
         raise RuntimeError(
             "SMTP authentication failed: check SMTP_USER and SMTP_PASSWORD. "
             "For Gmail, enable 2-Step Verification and use an App Password."
         ) from ex
     except Exception as ex:
+        logger.exception("Failed to send email: %s", ex)
         raise RuntimeError(f"Failed to send email: {ex}") from ex
 
 def send_password_reset_email(email: str, token: str) -> None:
@@ -223,6 +247,14 @@ def create_employee(user_id: int,
     """
     Creates an employee row. Accepts keyword args (used by GUI/signup).
     """
+    # basic validation
+    current_year = datetime.now(timezone.utc).year
+    if year_start is not None:
+        if not (1975 <= int(year_start) <= current_year):
+            raise ValueError(f"year_start must be between 1975 and {current_year}")
+    if role is not None and role not in ALLOWED_ROLES:
+        raise ValueError(f"Invalid role '{role}'. Allowed roles: {', '.join(ALLOWED_ROLES)}")
+
     try:
         with _conn() as conn:
             c = conn.cursor()
@@ -235,7 +267,8 @@ def create_employee(user_id: int,
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (user_id, employee_number, name, dob, job_title, role, year_start, year_end, profile_pic, contract_type))
             conn.commit()
-            return c.lastrowid
+            lid = c.lastrowid
+            return int(lid) if lid is not None else 0
     except sqlite3.IntegrityError as ie:
         raise ValueError("Employee creation failed: unique constraint violation") from ie
     except Exception as exc:
@@ -286,7 +319,7 @@ def has_open_session(employee_id: int) -> bool:
 def record_check_in(employee_id: int) -> Optional[str]:
     if has_checkin_today(employee_id):
         return None
-    now = datetime.now().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with _conn() as conn:
         c = conn.cursor()
         c.execute('INSERT INTO attendance (employee_id, check_in, check_out) VALUES (?, ?, NULL)', (employee_id, now))
@@ -294,7 +327,7 @@ def record_check_in(employee_id: int) -> Optional[str]:
         return now
 
 def record_check_out(employee_id: int) -> Optional[str]:
-    now = datetime.now().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     with _conn() as conn:
         c = conn.cursor()
         c.execute('''
@@ -469,5 +502,5 @@ def can_view_working_hours(actor_role: str, target_user_id: int, actor_user_id: 
 # Ensure DB and tables exist when the module is imported
 try:
     init_db()
-except Exception:
-    pass
+except Exception as exc:
+    logger.exception("Failed to initialize DB: %s", exc)

@@ -1,8 +1,12 @@
 import os
+import logging
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 from datetime import datetime
 from typing import Optional
+from types import SimpleNamespace
+
+logger = logging.getLogger(__name__)
 
 # database helpers
 from database.database import (
@@ -35,10 +39,11 @@ from database.database import (
 
 # optional PIL for profile pictures
 try:
-    from PIL import Image, ImageTk
-except Exception:
+    from PIL import Image, ImageTk  # type: ignore
+except Exception as exc:
     Image = None
     ImageTk = None
+    logger.info("Pillow not available: image features disabled (%s)", exc)
 
 init_db()
 
@@ -215,8 +220,8 @@ class EmployeeManagementWindow(tk.Toplevel):
             messagebox.showinfo("Select", "Select one employee first", parent=self)
             return
         vals = self.tree.item(sel[0])["values"]
-        emp_id = vals[0]
-        win = EmployeeProfileWindow(self, emp_id, self.actor_role, self.actor_user_id)
+        emp_id = int(vals[0])
+        win = EmployeeProfileWindow(self, emp_id, self.actor_role, int(self.actor_user_id) if self.actor_user_id is not None else 0)
         self.wait_window(win)
         self.load_employees()
 
@@ -227,6 +232,8 @@ class EmployeeManagementWindow(tk.Toplevel):
             return
         vals = self.tree.item(sel[0])["values"]
         emp_id, empnum, name, job, role, _, _, _, user_id = vals
+        emp_id = int(emp_id)
+        user_id = int(user_id) if user_id is not None else None
         if not messagebox.askyesno("Confirm", f"Delete employee {name} (#{empnum})?"):
             return
         try:
@@ -240,7 +247,9 @@ class EmployeeManagementWindow(tk.Toplevel):
                 tid = simpledialog.askinteger("Transfer Admin", f"Target user id to transfer admin to:\n{choices}", parent=self)
                 if not tid:
                     return
-                delete_user_with_admin_check(user_id, transfer_to_user_id=tid)
+                if user_id is None:
+                    raise ValueError("Target user id is missing for admin transfer")
+                delete_user_with_admin_check(int(user_id), transfer_to_user_id=int(tid))
             else:
                 with _conn() as conn:
                     c = conn.cursor()
@@ -300,12 +309,15 @@ class ManageUsersWindow(tk.Toplevel):
             messagebox.showinfo("Select", "Select user first", parent=self); return
         vals = self.tree.item(sel[0])["values"]
         uid, email, cur_role = vals
+        uid = int(uid)
         allowed = [r for r in ALLOWED_ROLES if can_grant_role(self.actor_role, r)]
         if not allowed:
             messagebox.showerror("Permission Denied", "You cannot grant any roles.", parent=self); return
-        new_role = simpledialog.askstring("Change Role", f"Allowed roles: {', '.join(allowed)}\nEnter new role:", parent=self)
-        if not new_role or new_role not in allowed:
-            messagebox.showerror("Invalid", "Invalid or not allowed role.", parent=self); return
+
+        from ui_helpers import role_selection_dialog
+        new_role = role_selection_dialog(self, email, cur_role, allowed)
+        if not new_role:
+            return
         try:
             update_user_role(uid, new_role)
             messagebox.showinfo("Updated", "Role updated.", parent=self)
@@ -319,6 +331,7 @@ class ManageUsersWindow(tk.Toplevel):
             messagebox.showinfo("Select", "Select user first", parent=self); return
         vals = self.tree.item(sel[0])["values"]
         uid, email, role = vals
+        uid = int(uid)
         if not messagebox.askyesno("Confirm", f"Delete user {email} ({role})?"):
             return
         try:
@@ -331,7 +344,7 @@ class ManageUsersWindow(tk.Toplevel):
                 tid = simpledialog.askinteger("Transfer Admin", f"Target user id to transfer admin to:\n{choices}", parent=self)
                 if not tid:
                     return
-                delete_user_with_admin_check(uid, transfer_to_user_id=tid)
+                delete_user_with_admin_check(uid, transfer_to_user_id=int(tid))
             else:
                 delete_user(uid)
             messagebox.showinfo("Deleted", "User removed", parent=self)
@@ -453,6 +466,16 @@ class HRApp(tk.Tk):
         self.manage_emp_btn.pack(fill="x", pady=(6,0))
         if self.user_role not in ("admin", "high_manager"):
             self.manage_emp_btn.config(state="disabled")
+        # Import from file feature
+        try:
+            from ui_import import ImportDialog
+            self.import_btn = ttk.Button(right_frame, text="Import Employees from File", command=lambda: ImportDialog(self))
+            self.import_btn.pack(fill="x", pady=(6,0))
+            if self.user_role not in ("admin", "high_manager"):
+                self.import_btn.config(state="disabled")
+        except Exception:
+            # optional feature; if imports aren't available do not crash GUI
+            logger.info("Import feature unavailable (missing dependencies)")
 
     def open_manage_users(self):
         if self.user_role != "admin":
@@ -461,7 +484,9 @@ class HRApp(tk.Tk):
         ManageUsersWindow(self, self.user_role)
 
     def load_employee_profile(self):
-        row = get_employee_by_id(self.employee_id)
+        if self.employee_id is None:
+            return
+        row = get_employee_by_id(int(self.employee_id))
         if not row:
             return
         emp_id, user_id, empnum, name, dob, job_title, role, year_start, year_end, profile_pic, contract_type = row
@@ -498,20 +523,20 @@ class HRApp(tk.Tk):
             self.check_status_lbl.config(text="No employee selected")
             self.check_btn.config(state="disabled")
             return
-        open_session = has_open_session(self.employee_id)
-        self.check_status_lbl.config(text="Open session" if open_session else "Not checked in")
-        self.check_btn.config(text="Check Out" if open_session else "Check In", state="normal")
+        open_session = has_open_session(int(self.employee_id))
+        self.check_status_lbl.config(text=("Open session" if open_session else "Not checked in"))
+        self.check_btn.config(text=("Check Out" if open_session else "Check In"), state="normal")
 
     def open_own_profile(self):
         if not self.employee_id or not self.employee:
             messagebox.showinfo("No profile", "No employee profile available", parent=self)
             return
-        win = EmployeeProfileWindow(self, self.employee_id, self.user_role, self.user_id)
+        win = EmployeeProfileWindow(self, int(self.employee_id), self.user_role, int(self.user_id) if self.user_id is not None else 0)
         self.wait_window(win)
         self.load_employee_profile()
 
     def open_employee_management(self):
-        EmployeeManagementWindow(self, self.user_role, self.user_id)
+        EmployeeManagementWindow(self, self.user_role, int(self.user_id) if self.user_id is not None else 0)
 
     def load_contracts(self):
         try:
@@ -549,16 +574,27 @@ class HRApp(tk.Tk):
 
     def add_contract(self):
         try:
-            cid = int(self.entry_cid.get().strip())
-            eid = int(self.entry_eid.get().strip())
+            cid_text = self.entry_cid.get().strip()
+            eid_text = self.entry_eid.get().strip()
             start = self.entry_start.get().strip()
             end = self.entry_end.get().strip()
             terms = self.entry_terms.get().strip()
-            class _C: pass
-            c = _C()
-            c.id = cid; c.employee_id = eid; c.start_date = start; c.end_date = end; c.terms = terms
+
+            try:
+                from ui_validators import validate_contract_fields
+                cid, eid, start_iso, end_iso = validate_contract_fields(cid_text, eid_text, start, end)
+            except Exception as ve:
+                messagebox.showerror("Validation", str(ve), parent=self)
+                return
+
+            # verify employee exists
+            if get_employee_by_id(eid) is None:
+                messagebox.showerror("Validation", f"Employee id {eid} does not exist.", parent=self)
+                return
+
+            c = SimpleNamespace(id=cid, employee_id=eid, start_date=start_iso, end_date=end_iso, terms=terms)
             add_contract_to_db(c)
-            messagebox.showinfo("Success", "Contract added.")
+            messagebox.showinfo("Success", "Contract added.", parent=self)
             self.clear_add_fields()
             self.load_contracts()
         except Exception as e:
@@ -572,14 +608,14 @@ class HRApp(tk.Tk):
         if not self.employee_id:
             messagebox.showinfo("No employee", "No employee selected", parent=self)
             return
-        if has_open_session(self.employee_id):
-            out = record_check_out(self.employee_id)
+        if has_open_session(int(self.employee_id)):
+            out = record_check_out(int(self.employee_id))
             if out:
                 messagebox.showinfo("Checked out", f"Checked out at {out}", parent=self)
             else:
                 messagebox.showerror("Error", "No open session to check out", parent=self)
         else:
-            inn = record_check_in(self.employee_id)
+            inn = record_check_in(int(self.employee_id))
             if inn:
                 messagebox.showinfo("Checked in", f"Checked in at {inn}", parent=self)
             else:
@@ -601,7 +637,7 @@ class HRApp(tk.Tk):
             messagebox.showerror("Error", "Month must be YYYY-MM", parent=self)
             return
         try:
-            seconds = get_month_work_seconds(self.employee_id, year, month)
+            seconds = get_month_work_seconds(int(self.employee_id), year, month)
             hours = seconds / 3600.0
             wage = float(self.wage_var.get().strip() or 0.0)
             salary = round(hours * wage, 2)

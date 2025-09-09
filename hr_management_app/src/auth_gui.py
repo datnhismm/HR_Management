@@ -1,7 +1,10 @@
 import os
+import logging
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from database.database import (
     create_user,
@@ -98,7 +101,14 @@ class SignUpWindow(tk.Toplevel):
         try:
             send_verification_code(email, code)
         except Exception as e:
-            messagebox.showwarning("Email failed", f"Could not send verification email: {e}\n\nShowing code for development.", parent=self)
+            # Log full exception, but show a friendly message to the user.
+            logger.exception("Failed to send verification code to %s", email)
+            messagebox.showwarning(
+                "Email failed",
+                "Could not send verification email. For development the code will be shown locally.",
+                parent=self,
+            )
+            # Only show the code (not the exception) so developers can continue locally.
             messagebox.showinfo("Verification code (dev)", f"Code: {code}", parent=self)
 
         user_code = simpledialog.askstring("Verification", "Enter 6-digit code sent to your email:", parent=self)
@@ -122,6 +132,7 @@ class SignUpWindow(tk.Toplevel):
             messagebox.showinfo("Success", f"Account created. Employee ID: {emp_id}", parent=self)
             self.destroy()
         except Exception as e:
+            logger.exception("Failed to create user %s: %s", email, e)
             messagebox.showerror("Error creating account", str(e), parent=self)
 
     def center_window(self):
@@ -210,9 +221,16 @@ class AuthWindow(tk.Tk):
                 send_password_reset_email(email, token)
                 messagebox.showinfo("Reset sent", "Password reset token sent to your email.", parent=self)
             except Exception as e:
-                messagebox.showwarning("Email failed", f"Could not send reset email: {e}\n\nShowing token for development.", parent=self)
+                # Log full exception, but keep UI messaging simple and safe.
+                logger.exception("Failed to send reset email to %s", email)
+                messagebox.showwarning(
+                    "Email failed",
+                    "Could not send reset email. For development the token will be shown locally.",
+                    parent=self,
+                )
                 messagebox.showinfo("Reset token (dev)", f"Token: {token}", parent=self)
         except Exception as e:
+            logger.exception("Failed to create reset token for %s: %s", email, e)
             messagebox.showerror("Error", f"Failed to create reset token: {e}", parent=self)
             return
 
