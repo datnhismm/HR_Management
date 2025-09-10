@@ -175,6 +175,12 @@ class EmployeeManagementWindow(tk.Toplevel):
     def __init__(self, parent, actor_role: str, actor_user_id: int):
         super().__init__(parent)
         self.actor_role = actor_role
+        # Restrict certain roles from opening this management window
+        if self.actor_role in ("driver", "construction_worker"):
+            from tkinter import messagebox
+            messagebox.showerror("Access Denied", "You do not have permission to manage employees.")
+            self.destroy()
+            return
         self.actor_user_id = actor_user_id
         self.title("Employee Management")
         self.geometry("900x420")
@@ -271,9 +277,10 @@ class EmployeeManagementWindow(tk.Toplevel):
         self.geometry(f"{w}x{h}+{x}+{y}")
 
 class ManageUsersWindow(tk.Toplevel):
-    def __init__(self, parent, actor_role: str):
+    def __init__(self, parent, actor_role: str, actor_user_id: Optional[int] = None):
         super().__init__(parent)
         self.actor_role = actor_role
+        self.actor_user_id = actor_user_id
         self.title("Manage Users")
         self.geometry("640x420")
         self.create_widgets()
@@ -293,8 +300,13 @@ class ManageUsersWindow(tk.Toplevel):
         btns = ttk.Frame(frm)
         btns.pack(fill="x", pady=6)
         ttk.Button(btns, text="Refresh", command=self.load_users).pack(side="left")
-        ttk.Button(btns, text="Change Role", command=self.change_role).pack(side="left", padx=4)
+        self.change_role_btn = ttk.Button(btns, text="Change Role", command=self.change_role)
+        self.change_role_btn.pack(side="left", padx=4)
         ttk.Button(btns, text="Delete User", command=self.delete_user).pack(side="left", padx=4)
+
+        # Only manager, high_manager and admin may change/grant roles
+        if self.actor_role not in ("admin", "high_manager", "manager"):
+            self.change_role_btn.config(state="disabled")
 
     def load_users(self):
         for i in self.tree.get_children():
@@ -312,14 +324,15 @@ class ManageUsersWindow(tk.Toplevel):
         uid = int(uid)
         allowed = [r for r in ALLOWED_ROLES if can_grant_role(self.actor_role, r)]
         if not allowed:
-            messagebox.showerror("Permission Denied", "You cannot grant any roles.", parent=self); return
+            messagebox.showerror("Permission Denied", "You cannot grant any roles.", parent=self)
+            return
 
         from ui_helpers import role_selection_dialog
         new_role = role_selection_dialog(self, email, cur_role, allowed)
         if not new_role:
             return
         try:
-            update_user_role(uid, new_role)
+            update_user_role(uid, new_role, actor_user_id=self.actor_user_id)
             messagebox.showinfo("Updated", "Role updated.", parent=self)
             self.load_users()
         except Exception as e:
@@ -371,6 +384,8 @@ class HRApp(tk.Tk):
         self.employee_id = employee_id
         self.user_role = user_role
         self.user_id = user_id
+        # explicit attribute so static analyzers know this attribute exists
+        self.contracts_list = None
         self.employee = None
         self.profile_image = None
         self.create_widgets()
@@ -404,6 +419,9 @@ class HRApp(tk.Tk):
         self.manage_users_btn.pack(anchor="w", pady=(6,0))
         if self.user_role != "admin":
             self.manage_users_btn.config(state="disabled")
+        if self.user_role in ("driver", "construction_worker"):
+            # restricted roles should not see/manage users
+            self.manage_users_btn.pack_forget()
 
         summary_frame = ttk.Frame(left_frame)
         summary_frame.pack(fill="x", pady=(8, 8))
@@ -418,12 +436,17 @@ class HRApp(tk.Tk):
         self.month_result = ttk.Label(summary_frame, text="Hours: 0.00  Salary: 0.00")
         self.month_result.grid(row=2, column=0, columnspan=3, pady=(6,0), sticky="w")
 
-        if not can_count_salary(self.user_role):
+        # Drivers and construction workers have restricted UI; they cannot use salary calc or see contracts
+        if not can_count_salary(self.user_role) or self.user_role in ("driver", "construction_worker"):
             self.calc_btn.config(state="disabled")
 
-        ttk.Label(left_frame, text="Contracts").pack(anchor="w")
-        self.contracts_list = tk.Listbox(left_frame, height=18)
-        self.contracts_list.pack(fill="both", expand=True, pady=(5,5))
+        # Contracts list: hidden for driver and construction worker
+        if self.user_role not in ("driver", "construction_worker"):
+            ttk.Label(left_frame, text="Contracts").pack(anchor="w")
+            self.contracts_list = tk.Listbox(left_frame, height=18)
+            self.contracts_list.pack(fill="both", expand=True, pady=(5,5))
+        else:
+            self.contracts_list = None
         btn_frame = ttk.Frame(left_frame)
         btn_frame.pack(fill="x", pady=(5,0))
         ttk.Button(btn_frame, text="Refresh", command=self.load_contracts).pack(side="left")
@@ -461,11 +484,16 @@ class HRApp(tk.Tk):
 
         if self.user_role not in ("admin", "high_manager"):
             self.add_contract_btn.config(state="disabled")
+        if self.user_role in ("driver", "construction_worker"):
+            # visually hide the add contract section for restricted roles
+            add_frame.pack_forget()
 
         self.manage_emp_btn = ttk.Button(right_frame, text="Manage Employees", command=self.open_employee_management)
         self.manage_emp_btn.pack(fill="x", pady=(6,0))
         if self.user_role not in ("admin", "high_manager"):
             self.manage_emp_btn.config(state="disabled")
+        if self.user_role in ("driver", "construction_worker"):
+            self.manage_emp_btn.pack_forget()
         # Import from file feature
         try:
             from ui_import import ImportDialog
@@ -473,6 +501,8 @@ class HRApp(tk.Tk):
             self.import_btn.pack(fill="x", pady=(6,0))
             if self.user_role not in ("admin", "high_manager"):
                 self.import_btn.config(state="disabled")
+            if self.user_role in ("driver", "construction_worker"):
+                self.import_btn.pack_forget()
         except Exception:
             # optional feature; if imports aren't available do not crash GUI
             logger.info("Import feature unavailable (missing dependencies)")
@@ -481,7 +511,8 @@ class HRApp(tk.Tk):
         if self.user_role != "admin":
             messagebox.showerror("Permission Denied", "Only admin can manage users.")
             return
-        ManageUsersWindow(self, self.user_role)
+        # pass current actor id so role changes are audited
+        ManageUsersWindow(self, self.user_role, int(self.user_id) if self.user_id is not None else None)
 
     def load_employee_profile(self):
         if self.employee_id is None:
@@ -539,6 +570,9 @@ class HRApp(tk.Tk):
         EmployeeManagementWindow(self, self.user_role, int(self.user_id) if self.user_id is not None else 0)
 
     def load_contracts(self):
+        # If contracts_list is not present for this role, skip
+        if self.contracts_list is None:
+            return
         try:
             self.contracts_list.delete(0, tk.END)
         except Exception:
@@ -552,6 +586,9 @@ class HRApp(tk.Tk):
             messagebox.showerror("Error", f"Failed to load contracts:\n{e}")
 
     def view_selected_contract(self):
+        if self.contracts_list is None:
+            messagebox.showinfo("Unavailable", "Contracts are not available for your role.")
+            return
         sel = self.contracts_list.curselection()
         if not sel:
             messagebox.showinfo("Info", "Select a contract first.")

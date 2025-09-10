@@ -6,6 +6,8 @@ try:
     RAPIDFUZZ_AVAILABLE = True
 except Exception:
     RAPIDFUZZ_AVAILABLE = False
+    rf_process = None
+import difflib
 
 FIELD_ALIASES = {
     "name": ["name", "full name", "fullname", "full_name"],
@@ -38,9 +40,8 @@ def map_columns(row: Dict[str, Any], fuzzy_threshold: int = FUZZY_THRESHOLD) -> 
             if nk == canonical or nk in aliases:
                 mapped = canonical
                 break
-        # fuzzy match fallback
-        if mapped is None and RAPIDFUZZ_AVAILABLE and fuzzy_threshold is not None and fuzzy_threshold >= 0:
-            # build choices like 'name' and its aliases
+        # fuzzy match fallback: build choices/key_map first
+        if mapped is None and fuzzy_threshold is not None and fuzzy_threshold >= 0:
             choices = []
             key_map = {}
             for canonical, aliases in FIELD_ALIASES.items():
@@ -49,10 +50,28 @@ def map_columns(row: Dict[str, Any], fuzzy_threshold: int = FUZZY_THRESHOLD) -> 
                 for a in aliases:
                     choices.append(a)
                     key_map[a] = canonical
-            res = rf_process.extractOne(nk, choices)
-            if res and res[1] >= fuzzy_threshold:
-                match = res[0]
-                mapped = key_map.get(match)
+            # try rapidfuzz first (if available)
+            if RAPIDFUZZ_AVAILABLE:
+                try:
+                    fn = getattr(rf_process, 'extractOne', None)
+                    if callable(fn):
+                        res = fn(nk, choices)
+                        if res and res[1] >= fuzzy_threshold:
+                            match = res[0]
+                            mapped = key_map.get(match)
+                except Exception:
+                    mapped = None
+            # fallback to stdlib difflib for small typos or when rapidfuzz isn't available
+            if mapped is None:
+                best = None
+                best_score = -1
+                for choice in choices:
+                    score = int(round(difflib.SequenceMatcher(None, nk, choice).ratio() * 100))
+                    if score > best_score:
+                        best_score = score
+                        best = choice
+                if best is not None and best_score >= fuzzy_threshold:
+                    mapped = key_map.get(best)
         if mapped:
             out[mapped] = v
     return out
@@ -74,8 +93,8 @@ def map_columns_debug(row: Dict[str, Any], fuzzy_threshold: int = FUZZY_THRESHOL
                 mapped = canonical
                 score = None
                 break
-        # fuzzy match fallback
-        if mapped is None and RAPIDFUZZ_AVAILABLE and fuzzy_threshold is not None and fuzzy_threshold >= 0:
+        # fuzzy match fallback: build choices/key_map first
+        if mapped is None and fuzzy_threshold is not None and fuzzy_threshold >= 0:
             choices = []
             key_map = {}
             for canonical, aliases in FIELD_ALIASES.items():
@@ -84,13 +103,31 @@ def map_columns_debug(row: Dict[str, Any], fuzzy_threshold: int = FUZZY_THRESHOL
                 for a in aliases:
                     choices.append(a)
                     key_map[a] = canonical
-            res = rf_process.extractOne(nk, choices)
-            if res:
-                match = res[0]
-                sc = int(round(res[1]))
-                if sc >= fuzzy_threshold:
-                    mapped = key_map.get(match)
-                    score = sc
+            if RAPIDFUZZ_AVAILABLE:
+                try:
+                    fn = getattr(rf_process, 'extractOne', None)
+                    if callable(fn):
+                        res = fn(nk, choices)
+                        if res:
+                            match = res[0]
+                            sc = int(round(res[1]))
+                            if sc >= fuzzy_threshold:
+                                mapped = key_map.get(match)
+                                score = sc
+                except Exception:
+                    mapped = None
+            # difflib fallback when rapidfuzz not present or score low
+            if mapped is None:
+                best = None
+                best_score = -1
+                for choice in choices:
+                    sc = int(round(difflib.SequenceMatcher(None, nk, choice).ratio() * 100))
+                    if sc > best_score:
+                        best_score = sc
+                        best = choice
+                if best is not None and best_score >= fuzzy_threshold:
+                    mapped = key_map.get(best)
+                    score = best_score
         if mapped:
             out[mapped] = v
             debug[str(k)] = (mapped, score)

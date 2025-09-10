@@ -70,6 +70,16 @@ def init_db() -> None:
                 FOREIGN KEY(user_id) REFERENCES users(id)
             )
         ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS role_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                changed_user_id INTEGER,
+                old_role TEXT,
+                new_role TEXT,
+                actor_user_id INTEGER,
+                changed_at TEXT
+            )
+        ''')
         conn.commit()
 
 # ---------- Contracts ----------
@@ -235,7 +245,7 @@ def send_verification_code(email: str, code: str) -> None:
     send_email(email, subject, body)
 
 # ---------- Employees ----------
-def create_employee(user_id: int,
+def create_employee(user_id: Optional[int],
                     name: str,
                     dob: Optional[str],
                     job_title: Optional[str],
@@ -258,6 +268,11 @@ def create_employee(user_id: int,
     try:
         with _conn() as conn:
             c = conn.cursor()
+            # if user_id provided, ensure no existing employee for that user
+            if user_id is not None:
+                c.execute("SELECT id FROM employees WHERE user_id = ?", (user_id,))
+                if c.fetchone():
+                    raise ValueError("Employee already exists for this user_id")
             c.execute("SELECT MAX(employee_number) FROM employees")
             row = c.fetchone()
             max_num = row[0] if row and row[0] else 999
@@ -410,12 +425,30 @@ def get_all_users() -> list:
         c.execute("SELECT id, email, role FROM users")
         return c.fetchall()
 
-def update_user_role(user_id: int, new_role: str) -> None:
+def update_user_role(user_id: int, new_role: str, actor_user_id: Optional[int] = None) -> None:
+    """
+    Update a user's role. Optionally record who performed the change (actor_user_id) in the role_audit table.
+    """
     if new_role == "admin" and get_admin_user():
         raise PermissionError("Only one admin account is allowed. Transfer admin role before assigning.")
     with _conn() as conn:
         c = conn.cursor()
+        # fetch old role for audit
+        c.execute("SELECT role FROM users WHERE id = ?", (user_id,))
+        row = c.fetchone()
+        old_role = row[0] if row else None
         c.execute("UPDATE users SET role = ? WHERE id = ?", (new_role, user_id))
+        # insert audit record
+        try:
+            from datetime import datetime
+            changed_at = datetime.now(timezone.utc).isoformat()
+            c.execute(
+                "INSERT INTO role_audit (changed_user_id, old_role, new_role, actor_user_id, changed_at) VALUES (?, ?, ?, ?, ?)",
+                (user_id, old_role, new_role, actor_user_id, changed_at),
+            )
+        except Exception:
+            # do not fail the update if audit insert fails; log and continue
+            logger.exception("Failed to write role_audit for user %s", user_id)
         conn.commit()
 
 def delete_user_with_admin_check(user_id: int, transfer_to_user_id: Optional[int] = None) -> bool:
@@ -454,10 +487,20 @@ ROLE_HIERARCHY = {
     "high_manager": 3,
     "manager": 2,
     "accountant": 1,
-    "engineer": 0
+    "engineer": 0,
+    "driver": 0,
+    "construction_worker": 0,
 }
 
-ALLOWED_ROLES = ["engineer", "accountant", "manager", "high_manager", "admin"]
+ALLOWED_ROLES = [
+    "engineer",
+    "accountant",
+    "manager",
+    "high_manager",
+    "admin",
+    "driver",
+    "construction_worker",
+]
 
 def can_edit(target_role: str, actor_role: str) -> bool:
     """Can actor edit target? Only if actor's role is higher."""
@@ -480,6 +523,10 @@ def can_grant_role(actor_role: str, target_role: str) -> bool:
     Can actor grant target_role? Actor must have higher hierarchy value.
     Non-admins cannot grant admin or high_manager roles.
     """
+    # Only manager, high_manager and admin can perform role assignments
+    if actor_role not in ("admin", "high_manager", "manager"):
+        return False
+    # Non-admins cannot grant admin or high_manager roles
     if actor_role != "admin" and target_role in ("admin", "high_manager"):
         return False
     return ROLE_HIERARCHY.get(actor_role, -1) > ROLE_HIERARCHY.get(target_role, -1)
