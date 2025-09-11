@@ -23,8 +23,6 @@ from database.database import _conn
 
 
 def fetch_records(limit=None):
-    conn = _conn()
-    c = conn.cursor()
     # join users and employees to get name, email, job_title, role, year_start
     q = '''
     SELECT u.email, e.name, e.job_title, e.role, e.year_start
@@ -32,13 +30,16 @@ def fetch_records(limit=None):
     LEFT JOIN employees e ON e.user_id = u.id
     WHERE e.name IS NOT NULL
     '''
-    if limit:
-        q += " LIMIT ?"
-        c.execute(q, (limit,))
-    else:
-        c.execute(q)
-    rows = c.fetchall()
     out = []
+    # Use context manager to ensure DB connection is closed promptly to avoid ResourceWarning
+    with _conn() as conn:
+        c = conn.cursor()
+        if limit:
+            c.execute(q, (limit,))
+        else:
+            c.execute(q)
+        rows = c.fetchall()
+
     for email, name, job_title, role, year_start in rows:
         out.append({
             "email": email,

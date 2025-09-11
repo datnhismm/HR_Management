@@ -13,16 +13,16 @@ from tkinter import ttk, filedialog, messagebox
 
 logger = logging.getLogger(__name__)
 
-from parsers.file_parser import parse_csv, parse_excel, parse_docx
-from parsers.normalizer import FUZZY_THRESHOLD, map_columns, validate_and_clean
-from parsers.mapping_store import load_config, save_config
-from ml.ner import extract_entities
-from database.database import create_employee, create_user, get_user_by_email
-from ml.imputer import infer_missing_fields
-from database.database import get_all_users
+from .parsers.file_parser import parse_csv, parse_excel, parse_docx
+from .parsers.normalizer import FUZZY_THRESHOLD, map_columns, validate_and_clean
+from .parsers.mapping_store import load_config, save_config
+from .ml.ner import extract_entities
+from .database.database import create_employee, create_user, get_user_by_email
+from .ml.imputer import infer_missing_fields
+from .database.database import get_all_users
 # optional ML imputer (load if model artifact exists)
 try:
-    from ml.imputer_ml import load_model, predict_batch
+    from .ml.imputer_ml import load_model, predict_batch
 except Exception:
     load_model = None
     predict_batch = None
@@ -90,6 +90,8 @@ class ImportDialog(tk.Toplevel):
         btns.pack(fill="x", pady=6)
         ttk.Button(btns, text="Import Selected", command=self.import_selected).pack(side="left", padx=6)
         ttk.Button(btns, text="Import All", command=self.import_all).pack(side="left", padx=6)
+        ttk.Button(btns, text="Preview Imputations", command=self.preview_imputations).pack(side="left", padx=6)
+        ttk.Button(btns, text="Export Audit CSV", command=self.export_audit_csv).pack(side="left", padx=6)
         ttk.Button(btns, text="Settings", command=self.open_settings).pack(side="right", padx=6)
         ttk.Button(btns, text="Close", command=self.destroy).pack(side="right", padx=6)
 
@@ -134,7 +136,7 @@ class ImportDialog(tk.Toplevel):
 
         # mapping preview (optional helper)
         try:
-            from parsers.normalizer import map_columns_debug
+            from .parsers.normalizer import map_columns_debug
         except Exception:
             map_columns_debug = None
 
@@ -239,6 +241,105 @@ class ImportDialog(tk.Toplevel):
             return
         self._do_import(list(range(len(self.records))))
 
+    def preview_imputations(self):
+        if not self.records:
+            messagebox.showinfo("No data", "Load a file first.", parent=self)
+            return
+        # Build a list of proposed imputations without applying them yet
+        proposals = []
+        for rec in self.records:
+            proposals.append({
+                "cleaned": dict(rec.get("cleaned", {})),
+                "proposed": {},
+            })
+        # if ML imputer available, run it to get proposed values
+        try:
+            if callable(load_model) and callable(predict_batch):
+                model = load_model()
+                if model:
+                    cleaned_list = [p["cleaned"] for p in proposals]
+                    preds = predict_batch(cleaned_list, model)
+                    for p, pr in zip(proposals, preds):
+                        # capture proposed values and any confidence/meta produced by the ML imputer
+                        proposed = {k: v for k, v in pr.items() if k and v is not None and not k.startswith("_")}
+                        # collect confidences if present in prediction dict (e.g., _imputed_job_conf)
+                        meta = {}
+                        if isinstance(pr, dict):
+                            # capture numeric metadata defensively
+                            jconf = pr.get("_imputed_job_conf")
+                            if jconf is not None:
+                                try:
+                                    meta["job_conf"] = float(jconf)
+                                except Exception:
+                                    # leave out invalid numeric metadata
+                                    pass
+                            ypred = pr.get("_imputed_year_pred")
+                            if ypred is not None:
+                                try:
+                                    meta["year_pred"] = float(ypred)
+                                except Exception:
+                                    pass
+                        p["proposed"].update(proposed)
+                        if meta:
+                            p.setdefault("meta", {}).update(meta)
+        except Exception:
+            logger.exception("ML preview failed; continuing with heuristics")
+
+        # also include heuristic imputations for any remaining missing
+        try:
+            db_stats = _collect_db_stats()
+            heur = infer_missing_fields([p["cleaned"] for p in proposals], db_stats=db_stats)
+            for p, h in zip(proposals, heur):
+                for k, v in h.items():
+                    if p["proposed"].get(k) is None and v is not None:
+                        p["proposed"][k] = v
+                        # heuristics have low-confidence by default
+                        p.setdefault("meta", {}).setdefault("heur_conf", {})[k] = 0.5
+        except Exception:
+            logger.exception("Heuristic preview failed")
+
+        dlg = ImputationPreviewDialog(self, proposals)
+        self.wait_window(dlg)
+        # apply accepted field-level proposals (dlg.accepted_map -> {row_idx: {field: value}})
+        accepted_map = getattr(dlg, "accepted_map", None)
+        if accepted_map:
+            for idx, fields in accepted_map.items():
+                if idx < 0 or idx >= len(self.records):
+                    continue
+                for field, val in fields.items():
+                    try:
+                        # only apply if missing or empty
+                        if self.records[idx]["cleaned"].get(field) in (None, "") and val is not None and val != "":
+                            old = self.records[idx]["cleaned"].get(field)
+                            self.records[idx]["cleaned"][field] = val
+                            # record audit (best-effort; don't fail import on audit error)
+                            try:
+                                from database.database import record_imputation_audit
+                                # determine source: check proposal meta for confidences
+                                src = "preview"
+                                meta = proposals[idx].get("meta", {}) if idx < len(proposals) else {}
+                                if meta.get("job_conf") is not None:
+                                    src = f"ml_conf_{meta.get('job_conf'):.2f}"
+                                elif meta.get("heur_conf"):
+                                    src = "heuristic"
+                                record_imputation_audit(row_index=idx, field=field, old_value=str(old) if old is not None else None, new_value=str(val), source=src)
+                            except Exception:
+                                logger.exception("Failed to record imputation audit for row %s field %s", idx, field)
+                    except Exception:
+                        continue
+            # refresh tree view
+            for item in self.tree.get_children():
+                vals = self.tree.item(item)["values"]
+                try:
+                    idx = int(vals[0]) - 1
+                except Exception:
+                    continue
+                rec = self.records[idx]
+                c = rec["cleaned"]
+                problems = ", ".join(rec["problems"]) if rec["problems"] else ""
+                self.tree.item(item, values=(idx + 1, c.get("name"), c.get("email"), c.get("dob"), c.get("job_title"), c.get("role"), c.get("year_start"), c.get("year_end"), c.get("contract_type"), problems))
+
+
     def _do_import(self, indices):
         created = 0
         skipped = 0
@@ -282,7 +383,7 @@ class ImportDialog(tk.Toplevel):
                 ye = _safe_int(cleaned.get("year_end"))
                 # if a user exists and already has an employee, skip to avoid duplicate
                 if uid is not None:
-                    from database.database import get_employee_by_user
+                    from .database.database import get_employee_by_user
                     if get_employee_by_user(uid):
                         skipped += 1
                         continue
@@ -314,6 +415,22 @@ class ImportDialog(tk.Toplevel):
         if getattr(dlg, "saved", False):
             save_config(dlg.config)
             messagebox.showinfo("Settings", "Settings saved.", parent=self)
+
+    def export_audit_csv(self):
+        try:
+            from database.database import export_imputation_audit_csv
+        except Exception:
+            messagebox.showerror("Export", "Cannot access database export function.", parent=self)
+            return
+        p = filedialog.asksaveasfilename(title="Export imputation audit to CSV", defaultextension=".csv", filetypes=[("CSV", "*.csv")], parent=self)
+        if not p:
+            return
+        try:
+            n = export_imputation_audit_csv(p)
+            messagebox.showinfo("Export", f"Exported {n} audit rows to {p}", parent=self)
+        except Exception as e:
+            logger.exception("Failed to export audit CSV: %s", e)
+            messagebox.showerror("Export failed", f"Failed to export audit CSV: {e}", parent=self)
 
     def center_window(self):
         self.update_idletasks()
@@ -499,6 +616,139 @@ class EditRowDialog(tk.Toplevel):
         self.update_idletasks()
         w = self.winfo_width() or 480
         h = self.winfo_height() or 320
+        ws = self.winfo_screenwidth()
+        hs = self.winfo_screenheight()
+        x = (ws // 2) - (w // 2)
+        y = (hs // 2) - (h // 2)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+
+
+class ImputationPreviewDialog(tk.Toplevel):
+    """Modal dialog to preview proposed imputations and accept/reject them (with inline editing)."""
+    def __init__(self, parent, proposals):
+        super().__init__(parent)
+        self.parent = parent
+        self.proposals = proposals or []
+        # accepted_map: {row_idx: {field: value}}
+        self.accepted_map = {}
+        self.title("Preview Imputations")
+        try:
+            self.transient(parent)
+        except Exception:
+            pass
+        self.grab_set()
+        self._build()
+        self.center_window()
+
+    def _build(self):
+        frm = ttk.Frame(self, padding=8)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text="Proposed imputations (select fields to accept and edit values inline):").pack(anchor="w")
+
+        pan = ttk.Frame(frm)
+        pan.pack(fill="both", expand=True, pady=(6, 6))
+
+        left = ttk.Frame(pan)
+        left.pack(side="left", fill="both", expand=False)
+        self.listbox = tk.Listbox(left, selectmode="browse", width=60, height=18)
+        self.listbox.pack(side="left", fill="both", expand=True)
+        lb_scroll = ttk.Scrollbar(left, orient="vertical", command=self.listbox.yview)
+        lb_scroll.pack(side="right", fill="y")
+        self.listbox.config(yscrollcommand=lb_scroll.set)
+
+        right = ttk.Frame(pan)
+        right.pack(side="left", fill="both", expand=True, padx=(8,0))
+        ttk.Label(right, text="Fields proposed for the selected row: ").pack(anchor="w")
+        self.detail_frame = ttk.Frame(right)
+        self.detail_frame.pack(fill="both", expand=True)
+
+        # store per-row per-field vars: {row_idx: {field: {'accepted': BooleanVar, 'value': StringVar}}}
+        self.rows_vars = {}
+
+        for idx, p in enumerate(self.proposals, start=1):
+            cleaned = p.get("cleaned", {})
+            props = p.get("proposed", {})
+            summary = []
+            for k, v in props.items():
+                summary.append(f"{k}={v}")
+            line = f"{idx}. {cleaned.get('name') or ''} | {cleaned.get('email') or ''} -> {', '.join(summary)}"
+            self.listbox.insert("end", line)
+            fvars = {}
+            for k, v in props.items():
+                fvars[k] = {
+                    'accepted': tk.BooleanVar(value=False),
+                    'value': tk.StringVar(value=str(v) if v is not None else "")
+                }
+            self.rows_vars[idx-1] = fvars
+
+        # bind selection to populate detail widgets
+        self.listbox.bind("<<ListboxSelect>>", self._on_select)
+
+        # bottom buttons
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(6, 0))
+        ttk.Button(btns, text="Accept Selected Fields", command=self.on_accept_selected).pack(side="left", padx=6)
+        ttk.Button(btns, text="Accept All Fields", command=self.on_accept_all).pack(side="left", padx=6)
+        ttk.Button(btns, text="Cancel", command=self.on_cancel).pack(side="right", padx=6)
+
+    def _on_select(self, event=None):
+        sel = list(self.listbox.curselection())
+        # show only first selected
+        for child in self.detail_frame.winfo_children():
+            child.destroy()
+        if not sel:
+            return
+        idx = sel[0]
+        row_vars = self.rows_vars.get(idx, {})
+        # show each proposed field with checkbox and inline entry
+        for field, vars in row_vars.items():
+            row = ttk.Frame(self.detail_frame)
+            row.pack(fill="x", pady=2)
+            cb = ttk.Checkbutton(row, text=field.replace('_', ' ').title(), variable=vars['accepted'])
+            cb.pack(side="left")
+            ent = ttk.Entry(row, textvariable=vars['value'], width=40)
+            ent.pack(side="left", padx=(8,0))
+            # show original value (if any) as a label to the right
+            orig = self.proposals[idx].get('cleaned', {}).get(field)
+            if orig is not None and str(orig) != "":
+                ttk.Label(row, text=f" (was: {orig})").pack(side="left", padx=(6,0))
+
+    def on_accept_selected(self):
+        sel = list(self.listbox.curselection())
+        if not sel:
+            return
+        idx = sel[0]
+        row_vars = self.rows_vars.get(idx, {})
+        accepted = {}
+        for field, vars in row_vars.items():
+            if vars['accepted'].get():
+                accepted[field] = vars['value'].get()
+        if accepted:
+            self.accepted_map[idx] = accepted
+        self.destroy()
+
+    def on_accept_all(self):
+        # accept every proposed field for every row with current edited values
+        self.accepted_map = {}
+        for idx, fvars in self.rows_vars.items():
+            accepted = {}
+            for field, vars in fvars.items():
+                # treat any non-empty value as accepted
+                val = vars['value'].get()
+                if val is not None and val != "":
+                    accepted[field] = val
+            if accepted:
+                self.accepted_map[idx] = accepted
+        self.destroy()
+
+    def on_cancel(self):
+        self.accepted_map = {}
+        self.destroy()
+
+    def center_window(self):
+        self.update_idletasks()
+        w = self.winfo_width() or 800
+        h = self.winfo_height() or 480
         ws = self.winfo_screenwidth()
         hs = self.winfo_screenheight()
         x = (ws // 2) - (w // 2)

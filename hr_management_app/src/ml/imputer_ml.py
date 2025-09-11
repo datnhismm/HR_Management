@@ -51,7 +51,18 @@ def _extract_features(records: List[Dict[str, Any]], le_role: Optional[Any] = No
     if le_role is None:
         le_role = LabelEncoder()
         le_role.fit(all_roles)
-    role_enc = le_role.transform(role_vals)
+    # Safely encode roles: LabelEncoder.transform will raise on unseen labels,
+    # so build a mapping from known classes to indices and fall back to 0.
+    try:
+        classes = list(le_role.classes_)
+    except Exception:
+        classes = list(set(role_vals))
+        try:
+            le_role.classes_ = classes
+        except Exception:
+            pass
+
+    mapping = {c: i for i, c in enumerate(classes)}
 
     X = []
     meta = {"le_role": le_role}
@@ -60,8 +71,10 @@ def _extract_features(records: List[Dict[str, Any]], le_role: Optional[Any] = No
         toks = _name_tokens(name)
         tok_count = len(toks)
         name_len = len(name)
-        role_val = role_enc[idx] if idx < len(role_enc) else 0
+        rv = role_vals[idx]
+        role_val = mapping.get(rv, 0)
         X.append([tok_count, name_len, role_val])
+
     try:
         import numpy as _np
         return _np.array(X), meta

@@ -1,10 +1,12 @@
 import os
 import sqlite3
+from contextlib import contextmanager
 import hashlib
 import secrets
 import smtplib
 import random
 import logging
+import csv
 from datetime import datetime, timedelta, date, timezone
 from email.message import EmailMessage
 from typing import List, Tuple, Optional
@@ -17,9 +19,23 @@ if not logger.handlers:
     # basic configuration (can be overridden by application)
     logging.basicConfig(level=logging.INFO)
 
+@contextmanager
 def _conn():
-    """Return sqlite connection located next to this module."""
-    return sqlite3.connect(os.path.join(os.path.dirname(__file__), DB_NAME))
+    """Context manager that yields a sqlite3.Connection and ensures it is closed.
+
+    Use like: with _conn() as conn: ...
+    This prevents ResourceWarnings when callers forget to close connections.
+    """
+    path = os.path.join(os.path.dirname(__file__), DB_NAME)
+    conn = sqlite3.connect(path)
+    try:
+        yield conn
+        # commit is usually explicit in callers; do not auto-commit here
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 def init_db() -> None:
     """Create required tables if missing."""
@@ -80,7 +96,61 @@ def init_db() -> None:
                 changed_at TEXT
             )
         ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS imputation_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                row_index INTEGER,
+                field TEXT,
+                old_value TEXT,
+                new_value TEXT,
+                source TEXT,
+                actor_user_id INTEGER,
+                applied_at TEXT
+            )
+        ''')
         conn.commit()
+
+
+def record_imputation_audit(row_index: int, field: str, old_value: Optional[str], new_value: Optional[str], source: str = "import_preview", actor_user_id: Optional[int] = None) -> None:
+    """Record an imputation decision into the imputation_audit table.
+
+    row_index: the index in the imported batch (0-based) for traceability.
+    field: the field name that was imputed (e.g., 'job_title').
+    old_value/new_value: textual values prior to and after imputation.
+    source: where the imputation originated (preview, ml, heuristic, etc.).
+    actor_user_id: optional user id who accepted the imputation.
+    """
+    try:
+        from datetime import datetime
+        applied_at = datetime.now(timezone.utc).isoformat()
+        with _conn() as conn:
+            c = conn.cursor()
+            c.execute(
+                "INSERT INTO imputation_audit (row_index, field, old_value, new_value, source, actor_user_id, applied_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (row_index, field, old_value, new_value, source, actor_user_id, applied_at),
+            )
+            conn.commit()
+    except Exception:
+        logger.exception("Failed to write imputation_audit for row %s field %s", row_index, field)
+
+
+def export_imputation_audit_csv(path: str) -> int:
+    """Export imputation_audit table to CSV. Returns number of rows exported."""
+    try:
+        with _conn() as conn:
+            c = conn.cursor()
+            c.execute("SELECT row_index, field, old_value, new_value, source, actor_user_id, applied_at FROM imputation_audit ORDER BY id")
+            rows = c.fetchall()
+        # write CSV
+        with open(path, "w", newline='', encoding='utf-8') as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["row_index", "field", "old_value", "new_value", "source", "actor_user_id", "applied_at"])
+            for r in rows:
+                writer.writerow(r)
+        return len(rows)
+    except Exception as exc:
+        logger.exception("Failed to export imputation_audit to %s: %s", path, exc)
+        raise
 
 # ---------- Contracts ----------
 def add_contract_to_db(contract) -> None:
