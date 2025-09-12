@@ -13,16 +13,16 @@ from tkinter import ttk, filedialog, messagebox
 
 logger = logging.getLogger(__name__)
 
-from .parsers.file_parser import parse_csv, parse_excel, parse_docx
-from .parsers.normalizer import FUZZY_THRESHOLD, map_columns, validate_and_clean
-from .parsers.mapping_store import load_config, save_config
-from .ml.ner import extract_entities
-from .database.database import create_employee, create_user, get_user_by_email
-from .ml.imputer import infer_missing_fields
-from .database.database import get_all_users
+from parsers.file_parser import parse_csv, parse_excel, parse_docx
+from parsers.normalizer import FUZZY_THRESHOLD, map_columns, validate_and_clean
+from parsers.mapping_store import load_config, save_config
+from ml.ner import extract_entities
+from database.database import create_employee, create_user, get_user_by_email
+from ml.imputer import infer_missing_fields
+from database.database import get_all_users
 # optional ML imputer (load if model artifact exists)
 try:
-    from .ml.imputer_ml import load_model, predict_batch
+    from ml.imputer_ml import load_model, predict_batch
 except Exception:
     load_model = None
     predict_batch = None
@@ -383,7 +383,7 @@ class ImportDialog(tk.Toplevel):
                 ye = _safe_int(cleaned.get("year_end"))
                 # if a user exists and already has an employee, skip to avoid duplicate
                 if uid is not None:
-                    from .database.database import get_employee_by_user
+                    from database.database import get_employee_by_user
                     if get_employee_by_user(uid):
                         skipped += 1
                         continue

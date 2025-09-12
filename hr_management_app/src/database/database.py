@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, date, timezone
 from email.message import EmailMessage
 from typing import List, Tuple, Optional
 
-DB_NAME = "hr_management.db"
+DB_NAME = os.getenv('HR_MANAGEMENT_TEST_DB', "hr_management.db")
 
 # module logger
 logger = logging.getLogger(__name__)
@@ -26,7 +26,16 @@ def _conn():
     Use like: with _conn() as conn: ...
     This prevents ResourceWarnings when callers forget to close connections.
     """
-    path = os.path.join(os.path.dirname(__file__), DB_NAME)
+    # Resolve DB path at call time so tests can override via HR_MANAGEMENT_TEST_DB env var.
+    env_db = os.getenv('HR_MANAGEMENT_TEST_DB')
+    if env_db:
+        # if absolute path provided, use it; otherwise treat as relative to package dir
+        if os.path.isabs(env_db):
+            path = env_db
+        else:
+            path = os.path.join(os.path.dirname(__file__), env_db)
+    else:
+        path = os.path.join(os.path.dirname(__file__), DB_NAME)
     conn = sqlite3.connect(path)
     try:
         yield conn
