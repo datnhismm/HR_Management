@@ -9,23 +9,45 @@ import logging
 import os
 import secrets
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 
-logger = logging.getLogger(__name__)
+from hr_management_app.src.parsers.file_parser import parse_csv, parse_docx, parse_excel
+from hr_management_app.src.parsers.mapping_store import load_config, save_config
+from hr_management_app.src.parsers.normalizer import (
+    FUZZY_THRESHOLD,
+    map_columns,
+    validate_and_clean,
+)
 
-from parsers.file_parser import parse_csv, parse_excel, parse_docx
-from parsers.normalizer import FUZZY_THRESHOLD, map_columns, validate_and_clean
-from parsers.mapping_store import load_config, save_config
-from ml.ner import extract_entities
-from database.database import create_employee, create_user, get_user_by_email
-from ml.imputer import infer_missing_fields
-from database.database import get_all_users
+try:
+    from hr_management_app.src.ml.ner import extract_entities
+except Exception:
+    from ml.ner import extract_entities  # type: ignore
+
+from hr_management_app.src.database.database import (
+    create_employee,
+    create_user,
+    get_user_by_email,
+)
+
+try:
+    from hr_management_app.src.ml.imputer import infer_missing_fields
+except Exception:
+    from ml.imputer import infer_missing_fields  # type: ignore
+
+from hr_management_app.src.database.database import get_all_users
+
 # optional ML imputer (load if model artifact exists)
 try:
-    from ml.imputer_ml import load_model, predict_batch
+    from hr_management_app.src.ml.imputer_ml import load_model, predict_batch
 except Exception:
-    load_model = None
-    predict_batch = None
+    try:
+        from ml.imputer_ml import load_model, predict_batch  # type: ignore
+    except Exception:
+        load_model = None
+        predict_batch = None
+
+logger = logging.getLogger(__name__)
 
 
 def _collect_db_stats() -> dict:
@@ -71,11 +93,26 @@ class ImportDialog(tk.Toplevel):
 
         top = ttk.Frame(frm)
         top.pack(fill="x", pady=(0, 8))
-        ttk.Entry(top, textvariable=self.path_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(top, text="Browse...", command=self._choose).pack(side="left", padx=6)
+        ttk.Entry(top, textvariable=self.path_var).pack(
+            side="left", fill="x", expand=True
+        )
+        ttk.Button(top, text="Browse...", command=self._choose).pack(
+            side="left", padx=6
+        )
         ttk.Button(top, text="Load", command=self._load).pack(side="left")
 
-        cols = ("#", "Name", "Email", "DOB", "Job Title", "Role", "Year Start", "Year End", "Contract", "Problems")
+        cols = (
+            "#",
+            "Name",
+            "Email",
+            "DOB",
+            "Job Title",
+            "Role",
+            "Year Start",
+            "Year End",
+            "Contract",
+            "Problems",
+        )
         self.tree = ttk.Treeview(frm, columns=cols, show="headings", height=14)
         for c in cols:
             self.tree.heading(c, text=c)
@@ -88,22 +125,43 @@ class ImportDialog(tk.Toplevel):
 
         btns = ttk.Frame(frm)
         btns.pack(fill="x", pady=6)
-        ttk.Button(btns, text="Import Selected", command=self.import_selected).pack(side="left", padx=6)
-        ttk.Button(btns, text="Import All", command=self.import_all).pack(side="left", padx=6)
-        ttk.Button(btns, text="Preview Imputations", command=self.preview_imputations).pack(side="left", padx=6)
-        ttk.Button(btns, text="Export Audit CSV", command=self.export_audit_csv).pack(side="left", padx=6)
-        ttk.Button(btns, text="Settings", command=self.open_settings).pack(side="right", padx=6)
+        ttk.Button(btns, text="Import Selected", command=self.import_selected).pack(
+            side="left", padx=6
+        )
+        ttk.Button(btns, text="Import All", command=self.import_all).pack(
+            side="left", padx=6
+        )
+        ttk.Button(
+            btns, text="Preview Imputations", command=self.preview_imputations
+        ).pack(side="left", padx=6)
+        ttk.Button(btns, text="Export Audit CSV", command=self.export_audit_csv).pack(
+            side="left", padx=6
+        )
+        ttk.Button(btns, text="Settings", command=self.open_settings).pack(
+            side="right", padx=6
+        )
         ttk.Button(btns, text="Close", command=self.destroy).pack(side="right", padx=6)
 
     def _choose(self):
-        p = filedialog.askopenfilename(title="Select file", filetypes=[("CSV", "*.csv"), ("Excel", "*.xlsx;*.xls"), ("Word", "*.docx"), ("All", "*.*")], parent=self)
+        p = filedialog.askopenfilename(
+            title="Select file",
+            filetypes=[
+                ("CSV", "*.csv"),
+                ("Excel", "*.xlsx;*.xls"),
+                ("Word", "*.docx"),
+                ("All", "*.*"),
+            ],
+            parent=self,
+        )
         if p:
             self.path_var.set(p)
 
     def _load(self):
         path = self.path_var.get().strip()
         if not path or not os.path.exists(path):
-            messagebox.showerror("File missing", "Please select a valid file.", parent=self)
+            messagebox.showerror(
+                "File missing", "Please select a valid file.", parent=self
+            )
             return
 
         ext = os.path.splitext(path)[1].lower()
@@ -117,8 +175,11 @@ class ImportDialog(tk.Toplevel):
                 if not raws:
                     try:
                         import docx as _docx
+
                         doc = _docx.Document(path)
-                        text = "\n".join(p.text for p in doc.paragraphs if p.text and p.text.strip())
+                        text = "\n".join(
+                            p.text for p in doc.paragraphs if p.text and p.text.strip()
+                        )
                         if text:
                             ent = extract_entities(text)
                             if ent:
@@ -129,7 +190,9 @@ class ImportDialog(tk.Toplevel):
                 raws = parse_csv(path)
         except Exception as e:
             logger.exception("Failed to parse file: %s", e)
-            messagebox.showerror("Parse error", f"Failed to parse file: {e}", parent=self)
+            messagebox.showerror(
+                "Parse error", f"Failed to parse file: {e}", parent=self
+            )
             return
 
         cfg = load_config() or {}
@@ -142,12 +205,19 @@ class ImportDialog(tk.Toplevel):
 
         if raws and callable(map_columns_debug):
             try:
-                _, mapping_debug = map_columns_debug(raws[0], fuzzy_threshold=cfg.get("threshold", FUZZY_THRESHOLD))
+                _, mapping_debug = map_columns_debug(
+                    raws[0], fuzzy_threshold=cfg.get("threshold", FUZZY_THRESHOLD)
+                )
             except Exception:
                 mapping_debug = None
 
             if mapping_debug:
-                dlg = MappingPreviewDialog(self, mapping_debug, prefill=cfg.get("mappings", {}), prethreshold=cfg.get("threshold", FUZZY_THRESHOLD))
+                dlg = MappingPreviewDialog(
+                    self,
+                    mapping_debug,
+                    prefill=cfg.get("mappings", {}),
+                    prethreshold=cfg.get("threshold", FUZZY_THRESHOLD),
+                )
                 self.wait_window(dlg)
                 mapping = getattr(dlg, "mapping", None)
                 if mapping:
@@ -166,10 +236,14 @@ class ImportDialog(tk.Toplevel):
         self.records = []
         cleaned_batch = []
         for r in raws:
-            mapped = map_columns(r, fuzzy_threshold=cfg.get("threshold", FUZZY_THRESHOLD))
+            mapped = map_columns(
+                r, fuzzy_threshold=cfg.get("threshold", FUZZY_THRESHOLD)
+            )
             cleaned, problems = validate_and_clean(mapped)
             cleaned_batch.append(cleaned)
-            self.records.append({"raw": r, "mapped": mapped, "cleaned": cleaned, "problems": problems})
+            self.records.append(
+                {"raw": r, "mapped": mapped, "cleaned": cleaned, "problems": problems}
+            )
 
         # first try ML imputation if model present
         try:
@@ -179,14 +253,18 @@ class ImportDialog(tk.Toplevel):
                     cleaned_batch = predict_batch(cleaned_batch, model)
                     # copy ML-predicted values back into records
                     for rec, imp in zip(self.records, cleaned_batch):
-                        rec["cleaned"].update({k: v for k, v in imp.items() if v is not None})
+                        rec["cleaned"].update(
+                            {k: v for k, v in imp.items() if v is not None}
+                        )
         except Exception:
             logger.exception("ML imputation failed; falling back to heuristics")
 
         # perform lightweight heuristic imputation for any remaining missing fields
         try:
             db_stats = _collect_db_stats()
-            imputed = infer_missing_fields([rec["cleaned"] for rec in self.records], db_stats=db_stats)
+            imputed = infer_missing_fields(
+                [rec["cleaned"] for rec in self.records], db_stats=db_stats
+            )
             # copy imputed values back into records (only override fields that were missing)
             for rec, imp in zip(self.records, imputed):
                 for k, v in imp.items():
@@ -200,14 +278,33 @@ class ImportDialog(tk.Toplevel):
         for idx, rec in enumerate(self.records, start=1):
             c = rec["cleaned"]
             problems = ", ".join(rec["problems"]) if rec["problems"] else ""
-            self.tree.insert("", "end", values=(idx, c.get("name"), c.get("email"), c.get("dob"), c.get("job_title"), c.get("role"), c.get("year_start"), c.get("year_end"), c.get("contract_type"), problems))
+            self.tree.insert(
+                "",
+                "end",
+                values=(
+                    idx,
+                    c.get("name"),
+                    c.get("email"),
+                    c.get("dob"),
+                    c.get("job_title"),
+                    c.get("role"),
+                    c.get("year_start"),
+                    c.get("year_end"),
+                    c.get("contract_type"),
+                    problems,
+                ),
+            )
 
-        self.status.config(text=f"Loaded {len(self.records)} records. Review and click Import Selected or Import All.")
+        self.status.config(
+            text=f"Loaded {len(self.records)} records. Review and click Import Selected or Import All."
+        )
 
     def import_selected(self):
         sel = self.tree.selection()
         if not sel:
-            messagebox.showinfo("Select", "Select rows to import or use Import All.", parent=self)
+            messagebox.showinfo(
+                "Select", "Select rows to import or use Import All.", parent=self
+            )
             return
         indices = [int(self.tree.item(s)["values"][0]) - 1 for s in sel]
         self._do_import(indices)
@@ -230,7 +327,21 @@ class ImportDialog(tk.Toplevel):
             vals = self.tree.item(item)["values"]
             try:
                 if int(vals[0]) - 1 == idx:
-                    self.tree.item(item, values=(idx + 1, c.get("name"), c.get("email"), c.get("dob"), c.get("job_title"), c.get("role"), c.get("year_start"), c.get("year_end"), c.get("contract_type"), problems))
+                    self.tree.item(
+                        item,
+                        values=(
+                            idx + 1,
+                            c.get("name"),
+                            c.get("email"),
+                            c.get("dob"),
+                            c.get("job_title"),
+                            c.get("role"),
+                            c.get("year_start"),
+                            c.get("year_end"),
+                            c.get("contract_type"),
+                            problems,
+                        ),
+                    )
                     break
             except Exception:
                 continue
@@ -248,10 +359,12 @@ class ImportDialog(tk.Toplevel):
         # Build a list of proposed imputations without applying them yet
         proposals = []
         for rec in self.records:
-            proposals.append({
-                "cleaned": dict(rec.get("cleaned", {})),
-                "proposed": {},
-            })
+            proposals.append(
+                {
+                    "cleaned": dict(rec.get("cleaned", {})),
+                    "proposed": {},
+                }
+            )
         # if ML imputer available, run it to get proposed values
         try:
             if callable(load_model) and callable(predict_batch):
@@ -261,7 +374,11 @@ class ImportDialog(tk.Toplevel):
                     preds = predict_batch(cleaned_list, model)
                     for p, pr in zip(proposals, preds):
                         # capture proposed values and any confidence/meta produced by the ML imputer
-                        proposed = {k: v for k, v in pr.items() if k and v is not None and not k.startswith("_")}
+                        proposed = {
+                            k: v
+                            for k, v in pr.items()
+                            if k and v is not None and not k.startswith("_")
+                        }
                         # collect confidences if present in prediction dict (e.g., _imputed_job_conf)
                         meta = {}
                         if isinstance(pr, dict):
@@ -288,7 +405,9 @@ class ImportDialog(tk.Toplevel):
         # also include heuristic imputations for any remaining missing
         try:
             db_stats = _collect_db_stats()
-            heur = infer_missing_fields([p["cleaned"] for p in proposals], db_stats=db_stats)
+            heur = infer_missing_fields(
+                [p["cleaned"] for p in proposals], db_stats=db_stats
+            )
             for p, h in zip(proposals, heur):
                 for k, v in h.items():
                     if p["proposed"].get(k) is None and v is not None:
@@ -309,22 +428,43 @@ class ImportDialog(tk.Toplevel):
                 for field, val in fields.items():
                     try:
                         # only apply if missing or empty
-                        if self.records[idx]["cleaned"].get(field) in (None, "") and val is not None and val != "":
+                        if (
+                            self.records[idx]["cleaned"].get(field) in (None, "")
+                            and val is not None
+                            and val != ""
+                        ):
                             old = self.records[idx]["cleaned"].get(field)
                             self.records[idx]["cleaned"][field] = val
                             # record audit (best-effort; don't fail import on audit error)
                             try:
-                                from database.database import record_imputation_audit
+                                from hr_management_app.src.database.database import (
+                                    record_imputation_audit,
+                                )
+
                                 # determine source: check proposal meta for confidences
                                 src = "preview"
-                                meta = proposals[idx].get("meta", {}) if idx < len(proposals) else {}
+                                meta = (
+                                    proposals[idx].get("meta", {})
+                                    if idx < len(proposals)
+                                    else {}
+                                )
                                 if meta.get("job_conf") is not None:
                                     src = f"ml_conf_{meta.get('job_conf'):.2f}"
                                 elif meta.get("heur_conf"):
                                     src = "heuristic"
-                                record_imputation_audit(row_index=idx, field=field, old_value=str(old) if old is not None else None, new_value=str(val), source=src)
+                                record_imputation_audit(
+                                    row_index=idx,
+                                    field=field,
+                                    old_value=str(old) if old is not None else None,
+                                    new_value=str(val),
+                                    source=src,
+                                )
                             except Exception:
-                                logger.exception("Failed to record imputation audit for row %s field %s", idx, field)
+                                logger.exception(
+                                    "Failed to record imputation audit for row %s field %s",
+                                    idx,
+                                    field,
+                                )
                     except Exception:
                         continue
             # refresh tree view
@@ -337,8 +477,21 @@ class ImportDialog(tk.Toplevel):
                 rec = self.records[idx]
                 c = rec["cleaned"]
                 problems = ", ".join(rec["problems"]) if rec["problems"] else ""
-                self.tree.item(item, values=(idx + 1, c.get("name"), c.get("email"), c.get("dob"), c.get("job_title"), c.get("role"), c.get("year_start"), c.get("year_end"), c.get("contract_type"), problems))
-
+                self.tree.item(
+                    item,
+                    values=(
+                        idx + 1,
+                        c.get("name"),
+                        c.get("email"),
+                        c.get("dob"),
+                        c.get("job_title"),
+                        c.get("role"),
+                        c.get("year_start"),
+                        c.get("year_end"),
+                        c.get("contract_type"),
+                        problems,
+                    ),
+                )
 
     def _do_import(self, indices):
         created = 0
@@ -383,11 +536,24 @@ class ImportDialog(tk.Toplevel):
                 ye = _safe_int(cleaned.get("year_end"))
                 # if a user exists and already has an employee, skip to avoid duplicate
                 if uid is not None:
-                    from database.database import get_employee_by_user
+                    from hr_management_app.src.database.database import (
+                        get_employee_by_user,
+                    )
+
                     if get_employee_by_user(uid):
                         skipped += 1
                         continue
-                create_employee(user_id=uid, name=str(cleaned.get("name") or ""), dob=str(cleaned.get("dob") or ""), job_title=str(cleaned.get("job_title") or ""), role=str(cleaned.get("role") or ""), year_start=ys, profile_pic=None, contract_type=str(cleaned.get("contract_type") or ""), year_end=ye)
+                create_employee(
+                    user_id=uid,
+                    name=str(cleaned.get("name") or ""),
+                    dob=str(cleaned.get("dob") or ""),
+                    job_title=str(cleaned.get("job_title") or ""),
+                    role=str(cleaned.get("role") or ""),
+                    year_start=ys,
+                    profile_pic=None,
+                    contract_type=str(cleaned.get("contract_type") or ""),
+                    year_end=ye,
+                )
                 created += 1
             except Exception as e:
                 logger.exception("Employee create failed: %s", e)
@@ -398,7 +564,7 @@ class ImportDialog(tk.Toplevel):
             summary += "\n\n" + "\n".join(errors[:10])
         messagebox.showinfo("Import Summary", summary, parent=self)
         try:
-            if hasattr(self.parent, 'load_employees'):
+            if hasattr(self.parent, "load_employees"):
                 self.parent.load_employees()
         except Exception:
             pass
@@ -409,7 +575,9 @@ class ImportDialog(tk.Toplevel):
         try:
             dlg = SettingsDialog(self, cfg)
         except Exception:
-            messagebox.showerror("Settings", "Cannot open settings dialog.", parent=self)
+            messagebox.showerror(
+                "Settings", "Cannot open settings dialog.", parent=self
+            )
             return
         self.wait_window(dlg)
         if getattr(dlg, "saved", False):
@@ -418,19 +586,32 @@ class ImportDialog(tk.Toplevel):
 
     def export_audit_csv(self):
         try:
-            from database.database import export_imputation_audit_csv
+            from hr_management_app.src.database.database import (
+                export_imputation_audit_csv,
+            )
         except Exception:
-            messagebox.showerror("Export", "Cannot access database export function.", parent=self)
+            messagebox.showerror(
+                "Export", "Cannot access database export function.", parent=self
+            )
             return
-        p = filedialog.asksaveasfilename(title="Export imputation audit to CSV", defaultextension=".csv", filetypes=[("CSV", "*.csv")], parent=self)
+        p = filedialog.asksaveasfilename(
+            title="Export imputation audit to CSV",
+            defaultextension=".csv",
+            filetypes=[("CSV", "*.csv")],
+            parent=self,
+        )
         if not p:
             return
         try:
             n = export_imputation_audit_csv(p)
-            messagebox.showinfo("Export", f"Exported {n} audit rows to {p}", parent=self)
+            messagebox.showinfo(
+                "Export", f"Exported {n} audit rows to {p}", parent=self
+            )
         except Exception as e:
             logger.exception("Failed to export audit CSV: %s", e)
-            messagebox.showerror("Export failed", f"Failed to export audit CSV: {e}", parent=self)
+            messagebox.showerror(
+                "Export failed", f"Failed to export audit CSV: {e}", parent=self
+            )
 
     def center_window(self):
         self.update_idletasks()
@@ -463,7 +644,9 @@ class MappingPreviewDialog(tk.Toplevel):
     def _build(self):
         frm = ttk.Frame(self, padding=8)
         frm.pack(fill="both", expand=True)
-        ttk.Label(frm, text="Adjust inferred header mappings (leave blank to ignore):").pack(anchor="w")
+        ttk.Label(
+            frm, text="Adjust inferred header mappings (leave blank to ignore):"
+        ).pack(anchor="w")
         self.entries = {}
         for orig, pair in self.mapping_debug.items():
             suggested, score = pair if isinstance(pair, (list, tuple)) else (pair, None)
@@ -481,7 +664,9 @@ class MappingPreviewDialog(tk.Toplevel):
         thr_row.pack(fill="x", pady=(8, 0))
         ttk.Label(thr_row, text="Fuzzy threshold (0-100):").pack(side="left")
         self.thr_var = tk.IntVar(value=self.threshold)
-        ttk.Spinbox(thr_row, from_=0, to=100, textvariable=self.thr_var, width=5).pack(side="left", padx=6)
+        ttk.Spinbox(thr_row, from_=0, to=100, textvariable=self.thr_var, width=5).pack(
+            side="left", padx=6
+        )
 
         btns = ttk.Frame(frm)
         btns.pack(fill="x", pady=(8, 0))
@@ -537,9 +722,13 @@ class SettingsDialog(tk.Toplevel):
         frm = ttk.Frame(self, padding=8)
         frm.pack(fill="both", expand=True)
         thr = int(self.config.get("threshold", FUZZY_THRESHOLD))
-        ttk.Label(frm, text="Fuzzy threshold (0-100):").grid(row=0, column=0, sticky="w")
+        ttk.Label(frm, text="Fuzzy threshold (0-100):").grid(
+            row=0, column=0, sticky="w"
+        )
         self.thr_var = tk.IntVar(value=thr)
-        ttk.Spinbox(frm, from_=0, to=100, textvariable=self.thr_var, width=6).grid(row=0, column=1, sticky="w", padx=6)
+        ttk.Spinbox(frm, from_=0, to=100, textvariable=self.thr_var, width=6).grid(
+            row=0, column=1, sticky="w", padx=6
+        )
         btns = ttk.Frame(frm)
         btns.grid(row=1, column=0, columnspan=2, pady=(8, 0))
         ttk.Button(btns, text="Save", command=self.on_save).pack(side="left", padx=6)
@@ -584,9 +773,20 @@ class EditRowDialog(tk.Toplevel):
         frm.pack(fill="both", expand=True)
         cleaned = self.record.get("cleaned", {})
         self.vars = {}
-        fields = ["name", "email", "dob", "job_title", "role", "year_start", "year_end", "contract_type"]
+        fields = [
+            "name",
+            "email",
+            "dob",
+            "job_title",
+            "role",
+            "year_start",
+            "year_end",
+            "contract_type",
+        ]
         for i, f in enumerate(fields):
-            ttk.Label(frm, text=f.replace("_", " ").title() + ":").grid(row=i, column=0, sticky="e")
+            ttk.Label(frm, text=f.replace("_", " ").title() + ":").grid(
+                row=i, column=0, sticky="e"
+            )
             v = tk.StringVar(value=str(cleaned.get(f) or ""))
             self.vars[f] = v
             ttk.Entry(frm, textvariable=v, width=40).grid(row=i, column=1, sticky="w")
@@ -625,6 +825,7 @@ class EditRowDialog(tk.Toplevel):
 
 class ImputationPreviewDialog(tk.Toplevel):
     """Modal dialog to preview proposed imputations and accept/reject them (with inline editing)."""
+
     def __init__(self, parent, proposals):
         super().__init__(parent)
         self.parent = parent
@@ -643,7 +844,10 @@ class ImputationPreviewDialog(tk.Toplevel):
     def _build(self):
         frm = ttk.Frame(self, padding=8)
         frm.pack(fill="both", expand=True)
-        ttk.Label(frm, text="Proposed imputations (select fields to accept and edit values inline):").pack(anchor="w")
+        ttk.Label(
+            frm,
+            text="Proposed imputations (select fields to accept and edit values inline):",
+        ).pack(anchor="w")
 
         pan = ttk.Frame(frm)
         pan.pack(fill="both", expand=True, pady=(6, 6))
@@ -657,7 +861,7 @@ class ImputationPreviewDialog(tk.Toplevel):
         self.listbox.config(yscrollcommand=lb_scroll.set)
 
         right = ttk.Frame(pan)
-        right.pack(side="left", fill="both", expand=True, padx=(8,0))
+        right.pack(side="left", fill="both", expand=True, padx=(8, 0))
         ttk.Label(right, text="Fields proposed for the selected row: ").pack(anchor="w")
         self.detail_frame = ttk.Frame(right)
         self.detail_frame.pack(fill="both", expand=True)
@@ -676,10 +880,10 @@ class ImputationPreviewDialog(tk.Toplevel):
             fvars = {}
             for k, v in props.items():
                 fvars[k] = {
-                    'accepted': tk.BooleanVar(value=False),
-                    'value': tk.StringVar(value=str(v) if v is not None else "")
+                    "accepted": tk.BooleanVar(value=False),
+                    "value": tk.StringVar(value=str(v) if v is not None else ""),
                 }
-            self.rows_vars[idx-1] = fvars
+            self.rows_vars[idx - 1] = fvars
 
         # bind selection to populate detail widgets
         self.listbox.bind("<<ListboxSelect>>", self._on_select)
@@ -687,9 +891,15 @@ class ImputationPreviewDialog(tk.Toplevel):
         # bottom buttons
         btns = ttk.Frame(frm)
         btns.pack(fill="x", pady=(6, 0))
-        ttk.Button(btns, text="Accept Selected Fields", command=self.on_accept_selected).pack(side="left", padx=6)
-        ttk.Button(btns, text="Accept All Fields", command=self.on_accept_all).pack(side="left", padx=6)
-        ttk.Button(btns, text="Cancel", command=self.on_cancel).pack(side="right", padx=6)
+        ttk.Button(
+            btns, text="Accept Selected Fields", command=self.on_accept_selected
+        ).pack(side="left", padx=6)
+        ttk.Button(btns, text="Accept All Fields", command=self.on_accept_all).pack(
+            side="left", padx=6
+        )
+        ttk.Button(btns, text="Cancel", command=self.on_cancel).pack(
+            side="right", padx=6
+        )
 
     def _on_select(self, event=None):
         sel = list(self.listbox.curselection())
@@ -704,14 +914,16 @@ class ImputationPreviewDialog(tk.Toplevel):
         for field, vars in row_vars.items():
             row = ttk.Frame(self.detail_frame)
             row.pack(fill="x", pady=2)
-            cb = ttk.Checkbutton(row, text=field.replace('_', ' ').title(), variable=vars['accepted'])
+            cb = ttk.Checkbutton(
+                row, text=field.replace("_", " ").title(), variable=vars["accepted"]
+            )
             cb.pack(side="left")
-            ent = ttk.Entry(row, textvariable=vars['value'], width=40)
-            ent.pack(side="left", padx=(8,0))
+            ent = ttk.Entry(row, textvariable=vars["value"], width=40)
+            ent.pack(side="left", padx=(8, 0))
             # show original value (if any) as a label to the right
-            orig = self.proposals[idx].get('cleaned', {}).get(field)
+            orig = self.proposals[idx].get("cleaned", {}).get(field)
             if orig is not None and str(orig) != "":
-                ttk.Label(row, text=f" (was: {orig})").pack(side="left", padx=(6,0))
+                ttk.Label(row, text=f" (was: {orig})").pack(side="left", padx=(6, 0))
 
     def on_accept_selected(self):
         sel = list(self.listbox.curselection())
@@ -721,8 +933,8 @@ class ImputationPreviewDialog(tk.Toplevel):
         row_vars = self.rows_vars.get(idx, {})
         accepted = {}
         for field, vars in row_vars.items():
-            if vars['accepted'].get():
-                accepted[field] = vars['value'].get()
+            if vars["accepted"].get():
+                accepted[field] = vars["value"].get()
         if accepted:
             self.accepted_map[idx] = accepted
         self.destroy()
@@ -734,7 +946,7 @@ class ImputationPreviewDialog(tk.Toplevel):
             accepted = {}
             for field, vars in fvars.items():
                 # treat any non-empty value as accepted
-                val = vars['value'].get()
+                val = vars["value"].get()
                 if val is not None and val != "":
                     accepted[field] = val
             if accepted:
@@ -754,5 +966,3 @@ class ImputationPreviewDialog(tk.Toplevel):
         x = (ws // 2) - (w // 2)
         y = (hs // 2) - (h // 2)
         self.geometry(f"{w}x{h}+{x}+{y}")
-
-

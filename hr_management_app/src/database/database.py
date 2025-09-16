@@ -1,23 +1,24 @@
-import os
-import sqlite3
-from contextlib import contextmanager
+import csv
 import hashlib
+import logging
+import os
+import random
 import secrets
 import smtplib
-import random
-import logging
-import csv
-from datetime import datetime, timedelta, date, timezone
+import sqlite3
+from contextlib import contextmanager
+from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
-from typing import List, Tuple, Optional
+from typing import List, Optional, Tuple
 
-DB_NAME = os.getenv('HR_MANAGEMENT_TEST_DB', "hr_management.db")
+DB_NAME = os.getenv("HR_MANAGEMENT_TEST_DB", "hr_management.db")
 
 # module logger
 logger = logging.getLogger(__name__)
 if not logger.handlers:
     # basic configuration (can be overridden by application)
     logging.basicConfig(level=logging.INFO)
+
 
 @contextmanager
 def _conn():
@@ -27,7 +28,7 @@ def _conn():
     This prevents ResourceWarnings when callers forget to close connections.
     """
     # Resolve DB path at call time so tests can override via HR_MANAGEMENT_TEST_DB env var.
-    env_db = os.getenv('HR_MANAGEMENT_TEST_DB')
+    env_db = os.getenv("HR_MANAGEMENT_TEST_DB")
     if env_db:
         # if absolute path provided, use it; otherwise treat as relative to package dir
         if os.path.isabs(env_db):
@@ -46,11 +47,13 @@ def _conn():
         except Exception:
             pass
 
+
 def init_db() -> None:
     """Create required tables if missing."""
     with _conn() as conn:
         c = conn.cursor()
-        c.execute('''
+        c.execute(
+            """
             CREATE TABLE IF NOT EXISTS contracts (
                 id INTEGER PRIMARY KEY,
                 employee_id INTEGER,
@@ -58,16 +61,46 @@ def init_db() -> None:
                 end_date TEXT,
                 terms TEXT
             )
-        ''')
-        c.execute('''
+        """
+        )
+        # Contract subsets (each contract can have many subsets/phases/tasks)
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS contract_subsets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                contract_id INTEGER,
+                title TEXT,
+                description TEXT,
+                status TEXT,
+                order_index INTEGER DEFAULT 0
+            )
+        """
+        )
+        # History of status changes for contract subsets
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS subset_status_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subset_id INTEGER,
+                old_status TEXT,
+                new_status TEXT,
+                actor_user_id INTEGER,
+                changed_at TEXT
+            )
+        """
+        )
+        c.execute(
+            """
             CREATE TABLE IF NOT EXISTS attendance (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 employee_id INTEGER,
                 check_in TEXT,
                 check_out TEXT
             )
-        ''')
-        c.execute('''
+        """
+        )
+        c.execute(
+            """
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 email TEXT UNIQUE NOT NULL,
@@ -78,8 +111,10 @@ def init_db() -> None:
                 totp_secret TEXT,
                 role TEXT DEFAULT 'engineer'
             )
-        ''')
-        c.execute('''
+        """
+        )
+        c.execute(
+            """
             CREATE TABLE IF NOT EXISTS employees (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER UNIQUE,
@@ -94,8 +129,10 @@ def init_db() -> None:
                 contract_type TEXT,
                 FOREIGN KEY(user_id) REFERENCES users(id)
             )
-        ''')
-        c.execute('''
+        """
+        )
+        c.execute(
+            """
             CREATE TABLE IF NOT EXISTS role_audit (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 changed_user_id INTEGER,
@@ -104,8 +141,10 @@ def init_db() -> None:
                 actor_user_id INTEGER,
                 changed_at TEXT
             )
-        ''')
-        c.execute('''
+        """
+        )
+        c.execute(
+            """
             CREATE TABLE IF NOT EXISTS imputation_audit (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 row_index INTEGER,
@@ -116,11 +155,29 @@ def init_db() -> None:
                 actor_user_id INTEGER,
                 applied_at TEXT
             )
-        ''')
+        """
+        )
         conn.commit()
 
+    def _safe_lastrowid(cursor) -> int:
+        """Return an int lastrowid or 0 if None/invalid."""
+        try:
+            lid = getattr(cursor, "lastrowid", None)
+            if lid is None:
+                return 0
+            return int(lid)
+        except Exception:
+            return 0
 
-def record_imputation_audit(row_index: int, field: str, old_value: Optional[str], new_value: Optional[str], source: str = "import_preview", actor_user_id: Optional[int] = None) -> None:
+
+def record_imputation_audit(
+    row_index: int,
+    field: str,
+    old_value: Optional[str],
+    new_value: Optional[str],
+    source: str = "import_preview",
+    actor_user_id: Optional[int] = None,
+) -> None:
     """Record an imputation decision into the imputation_audit table.
 
     row_index: the index in the imported batch (0-based) for traceability.
@@ -131,16 +188,27 @@ def record_imputation_audit(row_index: int, field: str, old_value: Optional[str]
     """
     try:
         from datetime import datetime
+
         applied_at = datetime.now(timezone.utc).isoformat()
         with _conn() as conn:
             c = conn.cursor()
             c.execute(
                 "INSERT INTO imputation_audit (row_index, field, old_value, new_value, source, actor_user_id, applied_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (row_index, field, old_value, new_value, source, actor_user_id, applied_at),
+                (
+                    row_index,
+                    field,
+                    old_value,
+                    new_value,
+                    source,
+                    actor_user_id,
+                    applied_at,
+                ),
             )
             conn.commit()
     except Exception:
-        logger.exception("Failed to write imputation_audit for row %s field %s", row_index, field)
+        logger.exception(
+            "Failed to write imputation_audit for row %s field %s", row_index, field
+        )
 
 
 def export_imputation_audit_csv(path: str) -> int:
@@ -148,12 +216,24 @@ def export_imputation_audit_csv(path: str) -> int:
     try:
         with _conn() as conn:
             c = conn.cursor()
-            c.execute("SELECT row_index, field, old_value, new_value, source, actor_user_id, applied_at FROM imputation_audit ORDER BY id")
+            c.execute(
+                "SELECT row_index, field, old_value, new_value, source, actor_user_id, applied_at FROM imputation_audit ORDER BY id"
+            )
             rows = c.fetchall()
         # write CSV
-        with open(path, "w", newline='', encoding='utf-8') as fh:
+        with open(path, "w", newline="", encoding="utf-8") as fh:
             writer = csv.writer(fh)
-            writer.writerow(["row_index", "field", "old_value", "new_value", "source", "actor_user_id", "applied_at"])
+            writer.writerow(
+                [
+                    "row_index",
+                    "field",
+                    "old_value",
+                    "new_value",
+                    "source",
+                    "actor_user_id",
+                    "applied_at",
+                ]
+            )
             for r in rows:
                 writer.writerow(r)
         return len(rows)
@@ -161,26 +241,178 @@ def export_imputation_audit_csv(path: str) -> int:
         logger.exception("Failed to export imputation_audit to %s: %s", path, exc)
         raise
 
+
 # ---------- Contracts ----------
 def add_contract_to_db(contract) -> None:
     with _conn() as conn:
         c = conn.cursor()
-        c.execute('''
+        c.execute(
+            """
             INSERT OR REPLACE INTO contracts (id, employee_id, start_date, end_date, terms)
             VALUES (?, ?, ?, ?, ?)
-        ''', (contract.id, contract.employee_id, contract.start_date, contract.end_date, contract.terms))
+        """,
+            (
+                contract.id,
+                contract.employee_id,
+                contract.start_date,
+                contract.end_date,
+                contract.terms,
+            ),
+        )
         conn.commit()
+
 
 def get_all_contracts() -> List[Tuple]:
     with _conn() as conn:
         c = conn.cursor()
-        c.execute('SELECT id, employee_id, start_date, end_date, terms FROM contracts')
+        c.execute("SELECT id, employee_id, start_date, end_date, terms FROM contracts")
         return c.fetchall()
+
+
+# ---------- Contract subsets & status tracking ----------
+STATUS_CHOICES = [
+    "starting",
+    "to do",
+    "in progress",
+    "final settlement of phase 1",
+    "final settlement of phase 2",
+    "audit phase 1",
+    "audit phase 2",
+    "complete",
+    "fail",
+    "closing",
+    "done",
+]
+
+COMPLETED_STATUSES = set(
+    [
+        "final settlement of phase 1",
+        "final settlement of phase 2",
+        "audit phase 1",
+        "audit phase 2",
+        "complete",
+        "done",
+        "closing",
+    ]
+)
+
+STATUS_COLORS = {
+    "starting": "#E0E0E0",
+    "to do": "#FFEB3B",
+    "in progress": "#2196F3",
+    "final settlement of phase 1": "#4CAF50",
+    "final settlement of phase 2": "#43A047",
+    "audit phase 1": "#FF9800",
+    "audit phase 2": "#FB8C00",
+    "complete": "#2E7D32",
+    "fail": "#B71C1C",
+    "closing": "#6A1B9A",
+    "done": "#1B5E20",
+}
+
+
+def create_contract_subset(
+    contract_id: int,
+    title: str,
+    description: str = "",
+    status: str = "starting",
+    order_index: int = 0,
+) -> int:
+    if status not in STATUS_CHOICES:
+        raise ValueError(
+            f"Invalid status '{status}'. Allowed: {', '.join(STATUS_CHOICES)}"
+        )
+    with _conn() as conn:
+        c = conn.cursor()
+        c.execute(
+            """
+            INSERT INTO contract_subsets (contract_id, title, description, status, order_index)
+            VALUES (?, ?, ?, ?, ?)
+        """,
+            (contract_id, title, description, status, order_index),
+        )
+        conn.commit()
+        lid = getattr(c, "lastrowid", None)
+        return int(lid) if lid is not None else 0
+
+
+def get_subsets_for_contract(contract_id: int) -> List[Tuple]:
+    with _conn() as conn:
+        c = conn.cursor()
+        c.execute(
+            """
+            SELECT id, contract_id, title, description, status, order_index
+            FROM contract_subsets WHERE contract_id = ? ORDER BY order_index, id
+        """,
+            (contract_id,),
+        )
+        return c.fetchall()
+
+
+def update_subset_status(
+    subset_id: int, new_status: str, actor_user_id: Optional[int] = None
+) -> None:
+    """Update subset status and record history.
+
+    actor_user_id is required (audit) and must be one of allowed roles.
+    """
+    if new_status not in STATUS_CHOICES:
+        raise ValueError(f"Invalid status '{new_status}'")
+    # actor must be provided for auditing
+    if actor_user_id is None:
+        raise PermissionError("actor_user_id is required to change subset status")
+    # permission check: only certain roles may change subset status
+    allowed_roles = ("accountant", "manager", "high_manager", "admin")
+    actor = get_user_by_id(actor_user_id)
+    actor_role = actor[-1] if actor else None
+    if actor_role not in allowed_roles:
+        raise PermissionError(
+            f"Actor role '{actor_role}' is not permitted to change subset status"
+        )
+    from datetime import datetime
+
+    with _conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT status FROM contract_subsets WHERE id = ?", (subset_id,))
+        row = c.fetchone()
+        old_status = row[0] if row else None
+        c.execute(
+            "UPDATE contract_subsets SET status = ? WHERE id = ?",
+            (new_status, subset_id),
+        )
+        changed_at = datetime.now().isoformat()
+        c.execute(
+            """
+            INSERT INTO subset_status_history (subset_id, old_status, new_status, actor_user_id, changed_at)
+            VALUES (?, ?, ?, ?, ?)
+        """,
+            (subset_id, old_status, new_status, actor_user_id, changed_at),
+        )
+        conn.commit()
+
+
+def get_subset_status_history(subset_id: int) -> List[Tuple]:
+    with _conn() as conn:
+        c = conn.cursor()
+        c.execute(
+            """
+            SELECT id, subset_id, old_status, new_status, actor_user_id, changed_at
+            FROM subset_status_history WHERE subset_id = ? ORDER BY id
+        """,
+            (subset_id,),
+        )
+        return c.fetchall()
+
+
+def get_status_color(status: str) -> str:
+    return STATUS_COLORS.get(status, "#9E9E9E")
+
 
 # ---------- Auth / Users ----------
 def _hash_password(password: str, salt: bytes) -> str:
     dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 100_000)
     return dk.hex()
+
 
 def get_admin_user() -> Optional[Tuple]:
     """Return the admin user row, or None if no admin exists."""
@@ -189,37 +421,51 @@ def get_admin_user() -> Optional[Tuple]:
         c.execute("SELECT id, email, role FROM users WHERE role = 'admin' LIMIT 1")
         return c.fetchone()
 
+
 def create_user(email: str, password: str, role: str = "engineer") -> int:
     email = email.strip().lower()
     salt = os.urandom(16)
     pwd_hash = _hash_password(password, salt)
     if role == "admin" and get_admin_user():
-        raise PermissionError("There is already an admin account. Only one admin is allowed.")
+        raise PermissionError(
+            "There is already an admin account. Only one admin is allowed."
+        )
     try:
         with _conn() as conn:
             c = conn.cursor()
-            c.execute("INSERT INTO users (email, password_hash, salt, role) VALUES (?, ?, ?, ?)",
-                      (email, pwd_hash, salt.hex(), role))
+            c.execute(
+                "INSERT INTO users (email, password_hash, salt, role) VALUES (?, ?, ?, ?)",
+                (email, pwd_hash, salt.hex(), role),
+            )
             conn.commit()
-            lid = c.lastrowid
+            lid = getattr(c, "lastrowid", None)
             return int(lid) if lid is not None else 0
     except sqlite3.IntegrityError as ie:
         raise ValueError("Email already registered") from ie
     except Exception as exc:
         raise RuntimeError(f"Failed to create user: {exc}") from exc
 
+
 def get_user_by_email(email: str) -> Optional[Tuple]:
     email = email.strip().lower()
     with _conn() as conn:
         c = conn.cursor()
-        c.execute("SELECT id, email, password_hash, salt, reset_token, reset_expiry, totp_secret, role FROM users WHERE email = ?", (email,))
+        c.execute(
+            "SELECT id, email, password_hash, salt, reset_token, reset_expiry, totp_secret, role FROM users WHERE email = ?",
+            (email,),
+        )
         return c.fetchone()
+
 
 def get_user_by_id(user_id: int) -> Optional[Tuple]:
     with _conn() as conn:
         c = conn.cursor()
-        c.execute("SELECT id, email, password_hash, salt, reset_token, reset_expiry, totp_secret, role FROM users WHERE id = ?", (user_id,))
+        c.execute(
+            "SELECT id, email, password_hash, salt, reset_token, reset_expiry, totp_secret, role FROM users WHERE id = ?",
+            (user_id,),
+        )
         return c.fetchone()
+
 
 def verify_user(email: str, password: str) -> bool:
     row = get_user_by_email(email)
@@ -229,20 +475,27 @@ def verify_user(email: str, password: str) -> bool:
     salt = bytes.fromhex(salt_hex)
     return _hash_password(password, salt) == stored_hash
 
+
 def create_reset_token(email: str, hours_valid: int = 1) -> str:
     token = secrets.token_urlsafe(32)
     expiry = (datetime.now(timezone.utc) + timedelta(hours=hours_valid)).isoformat()
     with _conn() as conn:
         c = conn.cursor()
-        c.execute("UPDATE users SET reset_token = ?, reset_expiry = ? WHERE email = ?", (token, expiry, email.strip().lower()))
+        c.execute(
+            "UPDATE users SET reset_token = ?, reset_expiry = ? WHERE email = ?",
+            (token, expiry, email.strip().lower()),
+        )
         conn.commit()
     return token
+
 
 def reset_password_with_token(token: str, new_password: str) -> bool:
     now_dt = datetime.now(timezone.utc)
     with _conn() as conn:
         c = conn.cursor()
-        c.execute("SELECT id, email, reset_expiry FROM users WHERE reset_token = ?", (token,))
+        c.execute(
+            "SELECT id, email, reset_expiry FROM users WHERE reset_token = ?", (token,)
+        )
         row = c.fetchone()
         if not row:
             return False
@@ -259,10 +512,13 @@ def reset_password_with_token(token: str, new_password: str) -> bool:
             return False
         salt = os.urandom(16)
         pwd_hash = _hash_password(new_password, salt)
-        c.execute("UPDATE users SET password_hash = ?, salt = ?, reset_token = NULL, reset_expiry = NULL WHERE reset_token = ?",
-                  (pwd_hash, salt.hex(), token))
+        c.execute(
+            "UPDATE users SET password_hash = ?, salt = ?, reset_token = NULL, reset_expiry = NULL WHERE reset_token = ?",
+            (pwd_hash, salt.hex(), token),
+        )
         conn.commit()
     return True
+
 
 # ---------- Email helpers (requires email_config.py) ----------
 def send_email(to_email: str, subject: str, body: str) -> None:
@@ -271,10 +527,20 @@ def send_email(to_email: str, subject: str, body: str) -> None:
     Raises RuntimeError with a helpful message on failure.
     """
     try:
-        from email_config import SMTP_SERVER, SMTP_PORT, SMTP_USE_SSL, SMTP_USER, SMTP_PASSWORD, FROM_EMAIL, SMTP_CONFIGURED
+        from email_config import (
+            FROM_EMAIL,
+            SMTP_CONFIGURED,
+            SMTP_PASSWORD,
+            SMTP_PORT,
+            SMTP_SERVER,
+            SMTP_USE_SSL,
+            SMTP_USER,
+        )
     except Exception as e:
         logger.exception("Failed to import email_config: %s", e)
-        raise RuntimeError("Missing or invalid email_config.py in src/ — create it with SMTP settings.") from e
+        raise RuntimeError(
+            "Missing or invalid email_config.py in src/ — create it with SMTP settings."
+        ) from e
 
     # If SMTP isn't configured (development), skip sending and log.
     if not SMTP_CONFIGURED:
@@ -311,28 +577,34 @@ def send_email(to_email: str, subject: str, body: str) -> None:
         logger.exception("Failed to send email: %s", ex)
         raise RuntimeError(f"Failed to send email: {ex}") from ex
 
+
 def send_password_reset_email(email: str, token: str) -> None:
     reset_text = f"Use this token to reset your password (valid for one hour):\n\n{token}\n\nIf you did not request this, ignore."
     send_email(email, "Password reset for HR Management", reset_text)
 
+
 def generate_verification_code() -> str:
     return f"{random.randint(100000, 999999):06d}"
+
 
 def send_verification_code(email: str, code: str) -> None:
     subject = "Your HR Management Verification Code"
     body = f"Your verification code is: {code}\n\nEnter this code to complete your sign up."
     send_email(email, subject, body)
 
+
 # ---------- Employees ----------
-def create_employee(user_id: Optional[int],
-                    name: str,
-                    dob: Optional[str],
-                    job_title: Optional[str],
-                    role: Optional[str],
-                    year_start: Optional[int],
-                    profile_pic: Optional[str],
-                    contract_type: Optional[str],
-                    year_end: Optional[int] = None) -> int:
+def create_employee(
+    user_id: Optional[int],
+    name: str,
+    dob: Optional[str],
+    job_title: Optional[str],
+    role: Optional[str],
+    year_start: Optional[int],
+    profile_pic: Optional[str],
+    contract_type: Optional[str],
+    year_end: Optional[int] = None,
+) -> int:
     """
     Creates an employee row. Accepts keyword args (used by GUI/signup).
     """
@@ -342,7 +614,9 @@ def create_employee(user_id: Optional[int],
         if not (1975 <= int(year_start) <= current_year):
             raise ValueError(f"year_start must be between 1975 and {current_year}")
     if role is not None and role not in ALLOWED_ROLES:
-        raise ValueError(f"Invalid role '{role}'. Allowed roles: {', '.join(ALLOWED_ROLES)}")
+        raise ValueError(
+            f"Invalid role '{role}'. Allowed roles: {', '.join(ALLOWED_ROLES)}"
+        )
 
     try:
         with _conn() as conn:
@@ -356,29 +630,54 @@ def create_employee(user_id: Optional[int],
             row = c.fetchone()
             max_num = row[0] if row and row[0] else 999
             employee_number = max_num + 1
-            c.execute('''
+            c.execute(
+                """
                 INSERT INTO employees (user_id, employee_number, name, dob, job_title, role, year_start, year_end, profile_pic, contract_type)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (user_id, employee_number, name, dob, job_title, role, year_start, year_end, profile_pic, contract_type))
+            """,
+                (
+                    user_id,
+                    employee_number,
+                    name,
+                    dob,
+                    job_title,
+                    role,
+                    year_start,
+                    year_end,
+                    profile_pic,
+                    contract_type,
+                ),
+            )
             conn.commit()
-            lid = c.lastrowid
+            lid = getattr(c, "lastrowid", None)
             return int(lid) if lid is not None else 0
     except sqlite3.IntegrityError as ie:
-        raise ValueError("Employee creation failed: unique constraint violation") from ie
+        raise ValueError(
+            "Employee creation failed: unique constraint violation"
+        ) from ie
     except Exception as exc:
         raise RuntimeError(f"Failed to create employee: {exc}") from exc
+
 
 def get_employee_by_user(user_id: int) -> Optional[Tuple]:
     with _conn() as conn:
         c = conn.cursor()
-        c.execute("SELECT id, user_id, employee_number, name, dob, job_title, role, year_start, year_end, profile_pic, contract_type FROM employees WHERE user_id = ?", (user_id,))
+        c.execute(
+            "SELECT id, user_id, employee_number, name, dob, job_title, role, year_start, year_end, profile_pic, contract_type FROM employees WHERE user_id = ?",
+            (user_id,),
+        )
         return c.fetchone()
+
 
 def get_employee_by_id(emp_id: int) -> Optional[Tuple]:
     with _conn() as conn:
         c = conn.cursor()
-        c.execute("SELECT id, user_id, employee_number, name, dob, job_title, role, year_start, year_end, profile_pic, contract_type FROM employees WHERE id = ?", (emp_id,))
+        c.execute(
+            "SELECT id, user_id, employee_number, name, dob, job_title, role, year_start, year_end, profile_pic, contract_type FROM employees WHERE id = ?",
+            (emp_id,),
+        )
         return c.fetchone()
+
 
 def update_employee(emp_id: int, **kwargs) -> None:
     if not kwargs:
@@ -391,24 +690,33 @@ def update_employee(emp_id: int, **kwargs) -> None:
         c.execute(f"UPDATE employees SET {cols} WHERE id = ?", vals)
         conn.commit()
 
+
 # ---------- Attendance ----------
 def has_checkin_today(employee_id: int) -> bool:
     today_start = datetime.combine(date.today(), datetime.min.time()).isoformat()
     today_end = datetime.combine(date.today(), datetime.max.time()).isoformat()
     with _conn() as conn:
         c = conn.cursor()
-        c.execute('''
+        c.execute(
+            """
             SELECT 1 FROM attendance
             WHERE employee_id = ? AND check_in BETWEEN ? AND ?
             LIMIT 1
-        ''', (employee_id, today_start, today_end))
+        """,
+            (employee_id, today_start, today_end),
+        )
         return c.fetchone() is not None
+
 
 def has_open_session(employee_id: int) -> bool:
     with _conn() as conn:
         c = conn.cursor()
-        c.execute('SELECT 1 FROM attendance WHERE employee_id = ? AND check_out IS NULL LIMIT 1', (employee_id,))
+        c.execute(
+            "SELECT 1 FROM attendance WHERE employee_id = ? AND check_out IS NULL LIMIT 1",
+            (employee_id,),
+        )
         return c.fetchone() is not None
+
 
 def record_check_in(employee_id: int) -> Optional[str]:
     if has_checkin_today(employee_id):
@@ -416,33 +724,44 @@ def record_check_in(employee_id: int) -> Optional[str]:
     now = datetime.now(timezone.utc).isoformat()
     with _conn() as conn:
         c = conn.cursor()
-        c.execute('INSERT INTO attendance (employee_id, check_in, check_out) VALUES (?, ?, NULL)', (employee_id, now))
+        c.execute(
+            "INSERT INTO attendance (employee_id, check_in, check_out) VALUES (?, ?, NULL)",
+            (employee_id, now),
+        )
         conn.commit()
         return now
+
 
 def record_check_out(employee_id: int) -> Optional[str]:
     now = datetime.now(timezone.utc).isoformat()
     with _conn() as conn:
         c = conn.cursor()
-        c.execute('''
+        c.execute(
+            """
             SELECT id FROM attendance
             WHERE employee_id = ? AND check_out IS NULL
             ORDER BY check_in DESC
             LIMIT 1
-        ''', (employee_id,))
+        """,
+            (employee_id,),
+        )
         row = c.fetchone()
         if not row:
             return None
         attendance_id = row[0]
-        c.execute('UPDATE attendance SET check_out = ? WHERE id = ?', (now, attendance_id))
+        c.execute(
+            "UPDATE attendance SET check_out = ? WHERE id = ?", (now, attendance_id)
+        )
         conn.commit()
         return now
+
 
 def get_work_seconds_in_period(employee_id: int, start_iso: str, end_iso: str) -> int:
     total_seconds = 0
     with _conn() as conn:
         c = conn.cursor()
-        c.execute('''
+        c.execute(
+            """
             SELECT check_in, check_out FROM attendance
             WHERE employee_id = ? AND check_out IS NOT NULL
               AND (
@@ -450,7 +769,9 @@ def get_work_seconds_in_period(employee_id: int, start_iso: str, end_iso: str) -
                  OR (check_out BETWEEN ? AND ?)
                  OR (check_in <= ? AND check_out >= ?)
               )
-        ''', (employee_id, start_iso, end_iso, start_iso, end_iso, start_iso, end_iso))
+        """,
+            (employee_id, start_iso, end_iso, start_iso, end_iso, start_iso, end_iso),
+        )
         rows = c.fetchall()
     for check_in, check_out in rows:
         try:
@@ -469,6 +790,7 @@ def get_work_seconds_in_period(employee_id: int, start_iso: str, end_iso: str) -
             continue
     return int(total_seconds)
 
+
 def get_month_work_seconds(employee_id: int, year: int, month: int) -> int:
     start = datetime(year, month, 1)
     if month == 12:
@@ -477,8 +799,11 @@ def get_month_work_seconds(employee_id: int, year: int, month: int) -> int:
         end = datetime(year, month + 1, 1) - timedelta(seconds=1)
     return get_work_seconds_in_period(employee_id, start.isoformat(), end.isoformat())
 
+
 # ---------- Calculate Salary ----------
-def calculate_salary(employee_id: int, start_date: str, end_date: str, hourly_wage: float) -> float:
+def calculate_salary(
+    employee_id: int, start_date: str, end_date: str, hourly_wage: float
+) -> float:
     try:
         try:
             s = datetime.fromisoformat(start_date)
@@ -497,6 +822,7 @@ def calculate_salary(employee_id: int, start_date: str, end_date: str, hourly_wa
     except Exception as exc:
         raise RuntimeError(f"Failed to calculate salary: {exc}")
 
+
 # ---------- Admin / User management ----------
 def get_all_users() -> list:
     with _conn() as conn:
@@ -504,12 +830,17 @@ def get_all_users() -> list:
         c.execute("SELECT id, email, role FROM users")
         return c.fetchall()
 
-def update_user_role(user_id: int, new_role: str, actor_user_id: Optional[int] = None) -> None:
+
+def update_user_role(
+    user_id: int, new_role: str, actor_user_id: Optional[int] = None
+) -> None:
     """
     Update a user's role. Optionally record who performed the change (actor_user_id) in the role_audit table.
     """
     if new_role == "admin" and get_admin_user():
-        raise PermissionError("Only one admin account is allowed. Transfer admin role before assigning.")
+        raise PermissionError(
+            "Only one admin account is allowed. Transfer admin role before assigning."
+        )
     with _conn() as conn:
         c = conn.cursor()
         # fetch old role for audit
@@ -520,6 +851,7 @@ def update_user_role(user_id: int, new_role: str, actor_user_id: Optional[int] =
         # insert audit record
         try:
             from datetime import datetime
+
             changed_at = datetime.now(timezone.utc).isoformat()
             c.execute(
                 "INSERT INTO role_audit (changed_user_id, old_role, new_role, actor_user_id, changed_at) VALUES (?, ?, ?, ?, ?)",
@@ -530,7 +862,10 @@ def update_user_role(user_id: int, new_role: str, actor_user_id: Optional[int] =
             logger.exception("Failed to write role_audit for user %s", user_id)
         conn.commit()
 
-def delete_user_with_admin_check(user_id: int, transfer_to_user_id: Optional[int] = None) -> bool:
+
+def delete_user_with_admin_check(
+    user_id: int, transfer_to_user_id: Optional[int] = None
+) -> bool:
     """
     Prevents deletion of an admin account unless the role is transferred to another user.
     Returns True if deletion succeeded, False otherwise.
@@ -544,14 +879,19 @@ def delete_user_with_admin_check(user_id: int, transfer_to_user_id: Optional[int
         role = row[0]
         if role == "admin":
             if not transfer_to_user_id:
-                raise PermissionError("Admin account cannot be deleted unless the role is transferred.")
+                raise PermissionError(
+                    "Admin account cannot be deleted unless the role is transferred."
+                )
             # Transfer admin role
-            c.execute("UPDATE users SET role = 'admin' WHERE id = ?", (transfer_to_user_id,))
+            c.execute(
+                "UPDATE users SET role = 'admin' WHERE id = ?", (transfer_to_user_id,)
+            )
             c.execute("UPDATE users SET role = 'engineer' WHERE id = ?", (user_id,))
         # Now delete the user (and optionally cascade employees) - only delete user row here
         c.execute("DELETE FROM users WHERE id = ?", (user_id,))
         conn.commit()
         return True
+
 
 def delete_user(user_id: int) -> None:
     with _conn() as conn:
@@ -559,6 +899,7 @@ def delete_user(user_id: int) -> None:
         c.execute("DELETE FROM employees WHERE user_id = ?", (user_id,))
         c.execute("DELETE FROM users WHERE id = ?", (user_id,))
         conn.commit()
+
 
 # ---------- Role Permission Logic ----------
 ROLE_HIERARCHY = {
@@ -581,21 +922,26 @@ ALLOWED_ROLES = [
     "construction_worker",
 ]
 
+
 def can_edit(target_role: str, actor_role: str) -> bool:
     """Can actor edit target? Only if actor's role is higher."""
     return ROLE_HIERARCHY.get(actor_role, -1) > ROLE_HIERARCHY.get(target_role, -1)
+
 
 def can_delete(target_role: str, actor_role: str) -> bool:
     """Only admin can delete users (other than admin)"""
     return actor_role == "admin" and target_role != "admin"
 
+
 def can_view_salary(actor_role: str) -> bool:
     """Who can view salary? Admin, high_manager, accountant."""
     return actor_role in ("admin", "high_manager", "accountant")
 
+
 def can_count_salary(actor_role: str) -> bool:
     """Who can use salary counting? Only accountant."""
     return actor_role == "accountant"
+
 
 def can_grant_role(actor_role: str, target_role: str) -> bool:
     """
@@ -610,10 +956,14 @@ def can_grant_role(actor_role: str, target_role: str) -> bool:
         return False
     return ROLE_HIERARCHY.get(actor_role, -1) > ROLE_HIERARCHY.get(target_role, -1)
 
+
 def can_edit_info(actor_role: str, target_role: str) -> bool:
     return can_edit(target_role, actor_role)
 
-def can_view_working_hours(actor_role: str, target_user_id: int, actor_user_id: int) -> bool:
+
+def can_view_working_hours(
+    actor_role: str, target_user_id: int, actor_user_id: int
+) -> bool:
     """Accountant can view all, engineer only self, managers view below their level."""
     if actor_role == "accountant":
         return True
@@ -624,6 +974,7 @@ def can_view_working_hours(actor_role: str, target_user_id: int, actor_user_id: 
         return False
     target_role_val = target[-1]
     return can_edit(target_role_val, actor_role)
+
 
 # Ensure DB and tables exist when the module is imported
 try:

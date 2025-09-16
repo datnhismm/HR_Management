@@ -9,10 +9,11 @@ Heuristics:
 - email: if missing and name present -> name-based email with domain example.com
 - name: if missing and email present -> infer from local-part
 """
-from typing import List, Dict, Any, Optional
-from collections import Counter, defaultdict
-import statistics
+
 import re
+import statistics
+from collections import Counter, defaultdict
+from typing import Any, Dict, List, Optional
 
 
 def _normalize_role(r):
@@ -44,7 +45,9 @@ def fit_from_records(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     job_by_role_top = {k: v.most_common(1)[0][0] for k, v in job_by_role.items() if v}
     job_global_top = global_jobs.most_common(1)[0][0] if global_jobs else None
 
-    year_median_by_job = {j: int(statistics.median(v)) for j, v in years_by_job.items() if v}
+    year_median_by_job = {
+        j: int(statistics.median(v)) for j, v in years_by_job.items() if v
+    }
     global_year_median = int(statistics.median(global_years)) if global_years else None
 
     return {
@@ -55,27 +58,29 @@ def fit_from_records(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def _email_from_name(name: str, idx: Optional[int] = None) -> str:
+def _email_from_name(name: Optional[str], idx: Optional[int] = None) -> str:
     if not name:
         return ""
-    s = re.sub(r"[^a-z0-9]+", ".", name.strip().lower())
+    s = re.sub(r"[^a-z0-9]+", ".", str(name).strip().lower())
     if idx:
         return f"{s}.{idx}@example.com"
     return f"{s}@example.com"
 
 
-def _name_from_email(email: str) -> Optional[str]:
+def _name_from_email(email: Optional[str]) -> Optional[str]:
     if not email:
         return None
-    local = email.split("@")[0]
-    parts = local.replace('.', ' ').replace('_', ' ').split()
+    local = str(email).split("@")[0]
+    parts = local.replace(".", " ").replace("_", " ").split()
     parts = [p.capitalize() for p in parts if p]
     if parts:
-        return ' '.join(parts)
+        return " ".join(parts)
     return None
 
 
-def predict_batch(records: List[Dict[str, Any]], model: Dict[str, Any]) -> List[Dict[str, Any]]:
+def predict_batch(
+    records: List[Dict[str, Any]], model: Dict[str, Any]
+) -> List[Dict[str, Any]]:
     out = []
     job_map = model.get("job_by_role_top", {})
     job_global = model.get("job_global_top")
@@ -90,7 +95,9 @@ def predict_batch(records: List[Dict[str, Any]], model: Dict[str, Any]) -> List[
                 rec["email"] = _email_from_name(rec.get("name"), idx)
                 rec["_imputed_email"] = True
         # name
-        if (not rec.get("name") or str(rec.get("name")).strip() == "") and rec.get("email"):
+        if (not rec.get("name") or str(rec.get("name")).strip() == "") and rec.get(
+            "email"
+        ):
             nm = _name_from_email(rec.get("email"))
             if nm:
                 rec["name"] = nm

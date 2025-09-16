@@ -3,34 +3,85 @@ Creates: hr_management_app/data/dummy_import_20k.xlsx
 Columns: email,name,job_title,role,year_start
 Approximately 1,000 rows will have 1-3 random missing fields.
 
-Run with the project venv: .\.venv\Scripts\python.exe hr_management_app\tools\generate_dummy_20k.py
+Run with the project venv: ./.venv/Scripts/python.exe hr_management_app/tools/generate_dummy_20k.py
 """
+
 import os
 import random
-from openpyxl import Workbook
 
-OUT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
+try:
+    from openpyxl import Workbook
+except Exception as exc:
+    raise SystemExit(
+        "openpyxl not installed. Run: python -m pip install openpyxl"
+    ) from exc
+
+OUT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 os.makedirs(OUT_DIR, exist_ok=True)
-OUT_FILE = os.path.join(OUT_DIR, 'dummy_import_20k.xlsx')
+OUT_FILE = os.path.join(OUT_DIR, "dummy_import_20k.xlsx")
 
 NUM_ROWS = 20000
 NUM_MISSING = 1000  # approx rows that will have at least one missing field
 
 FIRST_NAMES = [
-    'Alex','Sam','Jamie','Taylor','Jordan','Morgan','Casey','Chris','Pat','Drew',
-    'Lee','Robin','Cameron','Avery','Riley','Peyton','Blake','Rowan','Evan','Quinn'
+    "Alex",
+    "Sam",
+    "Jamie",
+    "Taylor",
+    "Jordan",
+    "Morgan",
+    "Casey",
+    "Chris",
+    "Pat",
+    "Drew",
+    "Lee",
+    "Robin",
+    "Cameron",
+    "Avery",
+    "Riley",
+    "Peyton",
+    "Blake",
+    "Rowan",
+    "Evan",
+    "Quinn",
 ]
 LAST_NAMES = [
-    'Smith','Johnson','Williams','Brown','Jones','Garcia','Miller','Davis','Rodriguez','Martinez',
-    'Hernandez','Lopez','Gonzalez','Wilson','Anderson','Thomas','Taylor','Moore','Jackson','Martin'
+    "Smith",
+    "Johnson",
+    "Williams",
+    "Brown",
+    "Jones",
+    "Garcia",
+    "Miller",
+    "Davis",
+    "Rodriguez",
+    "Martinez",
+    "Hernandez",
+    "Lopez",
+    "Gonzalez",
+    "Wilson",
+    "Anderson",
+    "Thomas",
+    "Taylor",
+    "Moore",
+    "Jackson",
+    "Martin",
 ]
 JOB_TITLES = [
-    'Software Engineer','Senior Software Engineer','Data Scientist','Product Manager','Sales Executive',
-    'HR Specialist','Marketing Manager','QA Engineer','DevOps Engineer','Customer Success Manager'
+    "Software Engineer",
+    "Senior Software Engineer",
+    "Data Scientist",
+    "Product Manager",
+    "Sales Executive",
+    "HR Specialist",
+    "Marketing Manager",
+    "QA Engineer",
+    "DevOps Engineer",
+    "Customer Success Manager",
 ]
-ROLES = ['engineering','data','product','sales','hr','marketing','ops','support']
+ROLES = ["engineering", "data", "product", "sales", "hr", "marketing", "ops", "support"]
 
-EMAIL_DOMAINS = ['example.com','example.org','test.com','fakecorp.com']
+EMAIL_DOMAINS = ["example.com", "example.org", "test.com", "fakecorp.com"]
 
 random.seed(42)
 
@@ -40,7 +91,7 @@ def random_name():
 
 
 def random_email(name, idx):
-    base = ''.join(c for c in name.lower() if c.isalpha() or c == ' ').replace(' ', '.')
+    base = "".join(c for c in name.lower() if c.isalpha() or c == " ").replace(" ", ".")
     return f"{base}.{idx}@{random.choice(EMAIL_DOMAINS)}"
 
 
@@ -51,13 +102,14 @@ def random_year_start():
 def create_workbook():
     wb = Workbook()
     ws = wb.active
-    ws.title = 'people'
-    headers = ['email','name','job_title','role','year_start']
+    assert ws is not None
+    ws.title = "people"
+    headers = ["email", "name", "job_title", "role", "year_start"]
     ws.append(headers)
 
-    missing_indices = set(random.sample(range(1, NUM_ROWS+1), NUM_MISSING))
+    missing_indices = set(random.sample(range(1, NUM_ROWS + 1), NUM_MISSING))
 
-    for i in range(1, NUM_ROWS+1):
+    for i in range(1, NUM_ROWS + 1):
         name = random_name()
         email = random_email(name, i)
         job = random.choice(JOB_TITLES)
@@ -72,18 +124,18 @@ def create_workbook():
 
         # If this row is selected for missing data, blank 1-3 random fields
         if i in missing_indices:
-            fields = ['email','name','job_title','role','year_start']
-            n_missing = random.randint(1,3)
+            fields = ["email", "name", "job_title", "role", "year_start"]
+            n_missing = random.randint(1, 3)
             to_blank = random.sample(fields, n_missing)
-            if 'email' in to_blank:
+            if "email" in to_blank:
                 email = None
-            if 'name' in to_blank:
+            if "name" in to_blank:
                 name = None
-            if 'job_title' in to_blank:
+            if "job_title" in to_blank:
                 job = None
-            if 'role' in to_blank:
+            if "role" in to_blank:
                 role = None
-            if 'year_start' in to_blank:
+            if "year_start" in to_blank:
                 year = None
 
         row = [email, name, job, role, year]
@@ -93,8 +145,8 @@ def create_workbook():
     return OUT_FILE
 
 
-if __name__ == '__main__':
-    print('Generating dummy XLSX...')
+if __name__ == "__main__":
+    print("Generating dummy XLSX...")
     path = create_workbook()
     size = os.path.getsize(path)
-    print(f'Wrote {path} ({size // 1024} KB)')
+    print(f"Wrote {path} ({size // 1024} KB)")

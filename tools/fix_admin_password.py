@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Set admin password using project's PBKDF2 hashing so verify_user succeeds.
 
-Run: $env:PYTHONPATH='hr_management_app/src'; .\.venv\Scripts\python.exe tools\fix_admin_password.py
+Run: set the PYTHONPATH to 'hr_management_app/src' and run the script with the project's Python.
+For example (PowerShell):
+    $env:PYTHONPATH='hr_management_app/src'; ./.venv/Scripts/python.exe tools/fix_admin_password.py
 """
 import os
 import datetime

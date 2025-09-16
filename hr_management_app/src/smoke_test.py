@@ -9,17 +9,18 @@ This script will:
 
 Run inside the project's venv Python as provided by the environment.
 """
-import os
+
 import time
 from datetime import datetime
-from database.database import (
-    create_user,
+
+from hr_management_app.src.database.database import (
     create_employee,
+    create_user,
+    get_employee_by_user,
+    get_month_work_seconds,
+    get_user_by_email,
     record_check_in,
     record_check_out,
-    get_month_work_seconds,
-    get_employee_by_user,
-    get_user_by_email,
 )
 
 # Use a unique email to avoid conflicts
@@ -27,7 +28,9 @@ email = f"smoke_test_{int(time.time())}@example.com"
 try:
     uid = create_user(email, "testpass123", role="engineer")
     print("create_user ->", uid)
-    eid = create_employee(uid, "Smoke Tester", None, "Tester", "engineer", 2025, None, "contract")
+    eid = create_employee(
+        uid, "Smoke Tester", None, "Tester", "engineer", 2025, None, "contract"
+    )
     print("create_employee ->", eid)
     user_row = get_user_by_email(email)
     emp_row = get_employee_by_user(uid)

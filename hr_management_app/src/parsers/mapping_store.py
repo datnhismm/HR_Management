@@ -1,6 +1,6 @@
-import os
 import json
-from typing import Dict, Any
+import os
+from typing import Any, Dict
 
 
 def _default_path() -> str:
@@ -10,7 +10,9 @@ def _default_path() -> str:
     root = None
     p = cur
     while True:
-        if os.path.exists(os.path.join(p, '.git')) or os.path.exists(os.path.join(p, 'README.md')):
+        if os.path.exists(os.path.join(p, ".git")) or os.path.exists(
+            os.path.join(p, "README.md")
+        ):
             root = p
             break
         parent = os.path.dirname(p)
@@ -18,7 +20,7 @@ def _default_path() -> str:
             break
         p = parent
     if root:
-        return os.path.join(root, '.hr_management_import_mappings.json')
+        return os.path.join(root, ".hr_management_import_mappings.json")
     # fallback to user's home directory
     home = os.path.expanduser("~")
     return os.path.join(home, ".hr_management_import_mappings.json")

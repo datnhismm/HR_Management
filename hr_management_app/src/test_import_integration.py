@@ -1,9 +1,8 @@
 import csv
-from pathlib import Path
 
-from parsers.file_parser import parse_csv
-from parsers.normalizer import map_columns, validate_and_clean
-import database.database as db
+from hr_management_app.src.database import database as db
+from hr_management_app.src.parsers.file_parser import parse_csv
+from hr_management_app.src.parsers.normalizer import map_columns, validate_and_clean
 
 
 def test_import_flow_with_fuzzy_headers(tmp_path):
@@ -14,8 +13,26 @@ def test_import_flow_with_fuzzy_headers(tmp_path):
 
     csv_path = tmp_path / "employees.csv"
     # introduce typos to force fuzzy matching (e.g., 'emal')
-    headers = ["Full Name", "emal", "birthdate", "Job Title", "Role", "joined", "left", "contract"]
-    row = ["Alice Example", "alice@example.com", "1990-05-12", "Engineer", "engineer", "2018", "", "permanent"]
+    headers = [
+        "Full Name",
+        "emal",
+        "birthdate",
+        "Job Title",
+        "Role",
+        "joined",
+        "left",
+        "contract",
+    ]
+    row = [
+        "Alice Example",
+        "alice@example.com",
+        "1990-05-12",
+        "Engineer",
+        "engineer",
+        "2018",
+        "",
+        "permanent",
+    ]
 
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -29,15 +46,17 @@ def test_import_flow_with_fuzzy_headers(tmp_path):
     assert not problems, f"Validation failed: {problems}"
 
     # create user and employee
-    email = cleaned.get("email")
-    user_id = db.create_user(email, "password123", role=cleaned.get("role") or "engineer")
+    email = cleaned.get("email") or ""
+    user_id = db.create_user(
+        str(email), "password123", role=str(cleaned.get("role") or "engineer")
+    )
     assert user_id > 0
     emp_id = db.create_employee(
         user_id=user_id,
-        name=cleaned.get("name"),
+        name=str(cleaned.get("name") or ""),
         dob=cleaned.get("dob"),
-        job_title=cleaned.get("job_title"),
-        role=cleaned.get("role"),
+        job_title=str(cleaned.get("job_title") or ""),
+        role=str(cleaned.get("role") or ""),
         year_start=cleaned.get("year_start"),
         profile_pic=None,
         contract_type=cleaned.get("contract_type"),

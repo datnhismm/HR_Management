@@ -1,4 +1,7 @@
-from ml.ner import extract_entities
+try:
+    from hr_management_app.src.ml.ner import extract_entities
+except Exception:
+    from ml.ner import extract_entities  # type: ignore
 
 
 def test_ner_fallback_extracts_email_and_name():

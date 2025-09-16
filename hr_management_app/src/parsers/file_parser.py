@@ -1,21 +1,34 @@
-import os
-from typing import List, Dict, Any
+from typing import Any, Dict, List
+
 import pandas as pd
+
 
 def parse_excel(path: str) -> List[Dict[str, Any]]:
     """Read an Excel file and return list of row dicts (columns as-is)."""
     xls = pd.read_excel(path, dtype=str)
     records = []
     for _, row in xls.fillna("").iterrows():
-        records.append({str(k).strip(): (v.strip() if isinstance(v, str) else v) for k, v in row.items()})
+        records.append(
+            {
+                str(k).strip(): (v.strip() if isinstance(v, str) else v)
+                for k, v in row.items()
+            }
+        )
     return records
+
 
 def parse_csv(path: str) -> List[Dict[str, Any]]:
     df = pd.read_csv(path, dtype=str)
     records = []
     for _, row in df.fillna("").iterrows():
-        records.append({str(k).strip(): (v.strip() if isinstance(v, str) else v) for k, v in row.items()})
+        records.append(
+            {
+                str(k).strip(): (v.strip() if isinstance(v, str) else v)
+                for k, v in row.items()
+            }
+        )
     return records
+
 
 def parse_docx(path: str) -> List[Dict[str, Any]]:
     """Very small docx parser: extract any tables and return rows; fallback to paragraphs.

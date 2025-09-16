@@ -1,33 +1,71 @@
-import os
-import unittest
 import csv
+import importlib
+import os
 import secrets
+import unittest
+from typing import Any
+
+from hr_management_app.src.database import database as db
+from hr_management_app.src.ml.imputer import infer_missing_fields
 from hr_management_app.src.parsers.file_parser import parse_csv
 from hr_management_app.src.parsers.normalizer import map_columns, validate_and_clean
-from hr_management_app.src.ml.imputer import infer_missing_fields
-from hr_management_app.src.database import database as db
 
+ML_AVAILABLE = False
 try:
-    from hr_management_app.src.ml.imputer_ml import load_model, predict_batch, fit_imputer_from_records
+    ml_mod = importlib.import_module("hr_management_app.src.ml.imputer_ml")
+    load_model = getattr(ml_mod, "load_model")
+    predict_batch = getattr(ml_mod, "predict_batch")
+    fit_imputer_from_records = getattr(ml_mod, "fit_imputer_from_records")
     ML_AVAILABLE = True
 except Exception:
-    ML_AVAILABLE = False
+    # permissive fallbacks
+    def load_model(*args: Any, **kwargs: Any) -> Any:
+        return None
+
+    def predict_batch(batch: Any, model: Any, *args: Any, **kwargs: Any) -> list[dict]:
+        return [{} for _ in batch]
+
+    def fit_imputer_from_records(*args: Any, **kwargs: Any) -> Any:
+        return None
+
 
 class IntegrationImportFlowTests(unittest.TestCase):
     def setUp(self):
         # create a small CSV with some missing fields
         self.csv_path = os.path.join(os.getcwd(), "tmp_integration.csv")
         rows = [
-            {"name": "Test User A", "email": "test.user.a+%s@example.com" % secrets.token_hex(4), "job_title": "Engineer", "role": "engineer", "year_start": "2010"},
-            {"name": "Test User B", "email": "", "job_title": "", "role": "manager", "year_start": ""},
-            {"name": "Test User C", "email": "test.user.c+%s@example.com" % secrets.token_hex(4), "job_title": "", "role": "", "year_start": "2008"},
+            {
+                "name": "Test User A",
+                "email": "test.user.a+%s@example.com" % secrets.token_hex(4),
+                "job_title": "Engineer",
+                "role": "engineer",
+                "year_start": "2010",
+            },
+            {
+                "name": "Test User B",
+                "email": "",
+                "job_title": "",
+                "role": "manager",
+                "year_start": "",
+            },
+            {
+                "name": "Test User C",
+                "email": "test.user.c+%s@example.com" % secrets.token_hex(4),
+                "job_title": "",
+                "role": "",
+                "year_start": "2008",
+            },
         ]
-        with open(self.csv_path, "w", newline='', encoding='utf-8') as fh:
-            writer = csv.DictWriter(fh, fieldnames=["name", "email", "job_title", "role", "year_start"])
+        with open(self.csv_path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(
+                fh, fieldnames=["name", "email", "job_title", "role", "year_start"]
+            )
             writer.writeheader()
             for r in rows:
                 writer.writerow(r)
-        self.addCleanup(lambda: os.path.exists(self.csv_path) and os.remove(self.csv_path))
+        self.addCleanup(
+            lambda: os.path.exists(self.csv_path) and os.remove(self.csv_path)
+        )
 
     def test_end_to_end_import_flow(self):
         raws = parse_csv(self.csv_path)
@@ -40,7 +78,9 @@ class IntegrationImportFlowTests(unittest.TestCase):
             mapped = map_columns(r, fuzzy_threshold=cfg.get("threshold", 80))
             cleaned, problems = validate_and_clean(mapped)
             cleaned_batch.append(cleaned)
-            records.append({"raw": r, "mapped": mapped, "cleaned": cleaned, "problems": problems})
+            records.append(
+                {"raw": r, "mapped": mapped, "cleaned": cleaned, "problems": problems}
+            )
 
         # try ML predictions if available
         try:
@@ -50,30 +90,39 @@ class IntegrationImportFlowTests(unittest.TestCase):
                     preds = predict_batch(cleaned_batch, model)
                     for rec, pr in zip(records, preds):
                         for k, v in pr.items():
-                            if k and not k.startswith("_") and v is not None and rec['cleaned'].get(k) in (None, ""):
-                                rec['cleaned'][k] = v
+                            if (
+                                k
+                                and not k.startswith("_")
+                                and v is not None
+                                and rec["cleaned"].get(k) in (None, "")
+                            ):
+                                rec["cleaned"][k] = v
         except Exception:
             pass
 
         # heuristics
-        heur = infer_missing_fields([r['cleaned'] for r in records], db_stats=db.get_all_users and {"emails": [u[1] for u in db.get_all_users()]})
+        heur = infer_missing_fields(
+            [r["cleaned"] for r in records],
+            db_stats=db.get_all_users
+            and {"emails": [u[1] for u in db.get_all_users()]},
+        )
         for rec, h in zip(records, heur):
             for k, v in h.items():
-                if rec['cleaned'].get(k) in (None, "") and v is not None:
-                    rec['cleaned'][k] = v
+                if rec["cleaned"].get(k) in (None, "") and v is not None:
+                    rec["cleaned"][k] = v
 
         # apply and create users/employees
         created_users = []
         created_employee_ids = []
         try:
             for rec in records:
-                cleaned = rec['cleaned']
-                email = cleaned.get('email')
+                cleaned = rec["cleaned"]
+                email = cleaned.get("email")
                 if email:
                     try:
                         existing = db.get_user_by_email(email)
                         if not existing:
-                            uid = db.create_user(email, 'Pwd12345!')
+                            uid = db.create_user(email, "Pwd12345!")
                         else:
                             uid = existing[0]
                         created_users.append(email)
@@ -84,7 +133,21 @@ class IntegrationImportFlowTests(unittest.TestCase):
                     uid = None
                 # create employee
                 try:
-                    emp_id = db.create_employee(user_id=uid, name=cleaned.get('name') or '', dob=cleaned.get('dob'), job_title=cleaned.get('job_title'), role=cleaned.get('role'), year_start=int(cleaned.get('year_start')) if cleaned.get('year_start') else None, profile_pic=None, contract_type=cleaned.get('contract_type'), year_end=None)
+                    emp_id = db.create_employee(
+                        user_id=uid,
+                        name=cleaned.get("name") or "",
+                        dob=cleaned.get("dob"),
+                        job_title=cleaned.get("job_title"),
+                        role=cleaned.get("role"),
+                        year_start=(
+                            int(cleaned.get("year_start"))
+                            if cleaned.get("year_start")
+                            else None
+                        ),
+                        profile_pic=None,
+                        contract_type=cleaned.get("contract_type"),
+                        year_end=None,
+                    )
                     created_employee_ids.append(emp_id)
                 except Exception:
                     pass
@@ -114,11 +177,13 @@ class IntegrationImportFlowTests(unittest.TestCase):
             try:
                 with db._conn() as conn:
                     c = conn.cursor()
-                    c.execute("DELETE FROM imputation_audit WHERE source = ?", ("preview",))
+                    c.execute(
+                        "DELETE FROM imputation_audit WHERE source = ?", ("preview",)
+                    )
                     conn.commit()
             except Exception:
                 pass
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

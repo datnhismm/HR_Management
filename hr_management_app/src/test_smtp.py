@@ -1,6 +1,8 @@
-import sys
 import smtplib
-from email_config import SMTP_SERVER, SMTP_PORT, SMTP_USE_SSL, SMTP_USER, SMTP_PASSWORD
+import sys
+
+from email_config import SMTP_PASSWORD, SMTP_PORT, SMTP_SERVER, SMTP_USE_SSL, SMTP_USER
+
 
 def test_smtp():
     try:
@@ -8,7 +10,9 @@ def test_smtp():
             s = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=10)
         else:
             s = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=10)
-            s.ehlo(); s.starttls(); s.ehlo()
+            s.ehlo()
+            s.starttls()
+            s.ehlo()
         if SMTP_USER:
             s.login(SMTP_USER, SMTP_PASSWORD)
         s.quit()
@@ -17,6 +21,7 @@ def test_smtp():
     except Exception as e:
         print("SMTP test failed:", type(e).__name__, e)
         return 2
+
 
 if __name__ == "__main__":
     sys.exit(test_smtp())

@@ -1,27 +1,36 @@
+import logging
+import sys
+from typing import Optional
+
 from contracts.models import Contract
 from contracts.views import display_contracts
-from database.database import (
-    init_db,
+from hr_management_app.src.database.database import (
     add_contract_to_db,
-    get_all_contracts,
     calculate_salary,
+    get_all_contracts,
+    init_db,
 )
-import sys
-import logging
 
 logger = logging.getLogger(__name__)
 
 # attendance functions (use the stable names available in database.database)
+# Provide typed stubs so static/type checkers know the expected signatures. The
+# real functions are imported below when available and will override these.
+
+
+def check_in(employee_id: int) -> Optional[str]:
+    raise RuntimeError("Attendance functions not available: check_in not loaded")
+
+
+def check_out(employee_id: int) -> Optional[str]:
+    raise RuntimeError("Attendance functions not available: check_out not loaded")
+
+
 try:
-    from database.database import record_check_in as check_in, record_check_out as check_out
+    from hr_management_app.src.database.database import record_check_in as check_in
+    from hr_management_app.src.database.database import record_check_out as check_out
 except Exception as exc:
     logger.exception("Attendance functions not available: %s", exc)
-
-    def check_in(employee_id):
-        raise RuntimeError("No check_in function available in database.database")
-
-    def check_out(employee_id):
-        raise RuntimeError("No check_out function available in database.database")
 
 
 def add_contract():
@@ -31,7 +40,13 @@ def add_contract():
         start_date = input("Enter start date (YYYY-MM-DD): ").strip()
         end_date = input("Enter end date (YYYY-MM-DD): ").strip()
         terms = input("Enter contract terms: ").strip()
-        contract = Contract(id=id_, employee_id=employee_id, start_date=start_date, end_date=end_date, terms=terms)
+        contract = Contract(
+            id=id_,
+            employee_id=employee_id,
+            start_date=start_date,
+            end_date=end_date,
+            terms=terms,
+        )
         add_contract_to_db(contract)
         print("Contract added successfully!\n")
     except Exception as e:
@@ -75,7 +90,9 @@ def salary_menu():
         end_date = input("Enter end date (YYYY-MM-DD): ").strip()
         hourly_wage = float(input("Enter hourly wage: ").strip())
         salary = calculate_salary(employee_id, start_date, end_date, hourly_wage)
-        print(f"Salary for employee {employee_id} from {start_date} to {end_date}: {salary:.2f}")
+        print(
+            f"Salary for employee {employee_id} from {start_date} to {end_date}: {salary:.2f}"
+        )
     except Exception as e:
         logger.exception("Error calculating salary: %s", e)
         print(f"Error calculating salary: {e}")

@@ -1,22 +1,23 @@
 import os
-import tempfile
 import shutil
-import pytest
+import tempfile
 
+import pytest
 
 # Session-level DB fixture: create a single temp DB for the whole test session
 # and initialize schema once. This is faster for local developer iterations but
 # provides weaker isolation than per-test DB files.
-_TMP_DIR = tempfile.mkdtemp(prefix='hr_test_db_')
-_DB_PATH = os.path.join(_TMP_DIR, 'test_hr_management.db')
-os.environ['HR_MANAGEMENT_TEST_DB'] = _DB_PATH
+_TMP_DIR = tempfile.mkdtemp(prefix="hr_test_db_")
+_DB_PATH = os.path.join(_TMP_DIR, "test_hr_management.db")
+os.environ["HR_MANAGEMENT_TEST_DB"] = _DB_PATH
 
 
-@pytest.fixture(scope='session', autouse=True)
+@pytest.fixture(scope="session", autouse=True)
 def session_db_setup():
     """Ensure schema exists for the session and cleanup at the end."""
     try:
-        import database.database as db
+        from hr_management_app.src.database import database as db
+
         db.init_db()
     except Exception:
         pass
@@ -37,11 +38,19 @@ def clean_tables_before_test():
     caused unique-email collisions when tests create users.
     """
     try:
-        import database.database as db
+        from hr_management_app.src.database import database as db
+
         with db._conn() as conn:
             c = conn.cursor()
             # Clear user-facing tables that tests mutate
-            for t in ('imputation_audit', 'role_audit', 'attendance', 'contracts', 'employees', 'users'):
+            for t in (
+                "imputation_audit",
+                "role_audit",
+                "attendance",
+                "contracts",
+                "employees",
+                "users",
+            ):
                 c.execute(f"DELETE FROM {t}")
             conn.commit()
     except Exception:

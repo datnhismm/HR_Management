@@ -1,5 +1,6 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import messagebox, ttk
+
 
 class AdminAuthPage(tk.Toplevel):
     def __init__(self, parent, user_role):
@@ -20,7 +21,9 @@ class AdminAuthPage(tk.Toplevel):
 
     def check_admin(self):
         if self.user_role != "admin":
-            messagebox.showerror("Access Denied", "You do not have admin privileges.", parent=self)
+            messagebox.showerror(
+                "Access Denied", "You do not have admin privileges.", parent=self
+            )
             self.destroy()
 
     def center_window(self):
@@ -31,7 +34,8 @@ class AdminAuthPage(tk.Toplevel):
         hs = self.winfo_screenheight()
         x = (ws // 2) - (w // 2)
         y = (hs // 2) - (h // 2)
-        self.geometry(f'{w}x{h}+{x}+{y}')
+        self.geometry(f"{w}x{h}+{x}+{y}")
+
 
 # Example usage:
 if __name__ == "__main__":

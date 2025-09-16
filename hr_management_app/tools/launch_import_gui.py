@@ -2,17 +2,28 @@
 
 This will open a Tkinter window. Use this when running on a desktop environment.
 """
-from pathlib import Path
+
 import sys
 import traceback
+from pathlib import Path
 
 # ensure local src is importable when running from tools/
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 try:
     import tkinter as tk
-    from ui_import import ImportDialog
-    p = Path(__file__).resolve().parents[1] / "src" / "tests" / "fixtures" / "dummy_employees_2000.xlsx"
+
+    try:
+        from hr_management_app.src.ui_import import ImportDialog
+    except Exception:
+        from ui_import import ImportDialog  # type: ignore
+    p = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "tests"
+        / "fixtures"
+        / "dummy_employees_2000.xlsx"
+    )
     if not p.exists():
         raise FileNotFoundError(f"Fixture not found: {p}")
 

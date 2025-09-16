@@ -1,7 +1,10 @@
 from datetime import datetime
 from typing import Tuple
 
-def validate_contract_fields(cid_text: str, eid_text: str, start: str, end: str) -> Tuple[int, int, str, str]:
+
+def validate_contract_fields(
+    cid_text: str, eid_text: str, start: str, end: str
+) -> Tuple[int, int, str, str]:
     """Validate and parse contract input strings.
 
     Returns (cid, eid, start_iso, end_iso) or raises ValueError with a message.

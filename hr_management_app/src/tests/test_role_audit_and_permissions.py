@@ -1,17 +1,10 @@
-import sys
-import os
 import time
-import pytest
 
-# ensure src/ is on sys.path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-from database.database import (
-    create_user,
-    get_user_by_id,
-    update_user_role,
-    can_grant_role,
+from hr_management_app.src.database.database import (
     _conn,
+    can_grant_role,
+    create_user,
+    update_user_role,
 )
 
 

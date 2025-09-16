@@ -1,17 +1,13 @@
-import sys
-import os
 import time
+
 import pytest
 
-# ensure src/ is on sys.path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-from database.database import (
+from hr_management_app.src.database.database import (
     create_user,
-    get_user_by_id,
-    update_user_role,
     delete_user_with_admin_check,
     get_admin_user,
+    get_user_by_id,
+    update_user_role,
 )
 
 
@@ -20,10 +16,10 @@ def test_update_user_role_admin_conflict():
     # use existing admin if present, otherwise create one
     admin = get_admin_user()
     if admin:
-        admin_id = admin[0]
+        _admin_id = admin[0]
     else:
         a_email = f"admin_test_{int(time.time())}@example.com"
-        admin_id = create_user(a_email, "p", role="admin")
+        _admin_id = create_user(a_email, "p", role="admin")
     u_email = f"user_test_{int(time.time())}@example.com"
     user_id = create_user(u_email, "p", role="engineer")
 
@@ -43,7 +39,7 @@ def test_delete_admin_requires_transfer_and_transfers_role():
     t_email = f"target_{int(time.time())}@example.com"
     target_id = create_user(t_email, "p", role="engineer")
     o_email = f"other_{int(time.time())}@example.com"
-    other_id = create_user(o_email, "p", role="engineer")
+    _other_id = create_user(o_email, "p", role="engineer")
 
     # attempt to delete admin without transfer -> should raise
     with pytest.raises(PermissionError):

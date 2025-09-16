@@ -1,8 +1,9 @@
 """Smoke test: parse the existing dummy XLSX and show imputation results for first N rows."""
-from parsers.file_parser import parse_excel
-from parsers.normalizer import map_columns, validate_and_clean
-from ml.imputer import infer_missing_fields
-from ui_import import _collect_db_stats
+
+from hr_management_app.src.ml.imputer import infer_missing_fields
+from hr_management_app.src.parsers.file_parser import parse_excel
+from hr_management_app.src.parsers.normalizer import map_columns, validate_and_clean
+from hr_management_app.src.ui_import import _collect_db_stats
 
 path = r"src/tests/fixtures/dummy_employees_2000.xlsx"
 raws = parse_excel(path)

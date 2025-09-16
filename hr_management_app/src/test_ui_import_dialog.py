@@ -1,12 +1,8 @@
 import csv
-import os
 import tkinter as tk
-from pathlib import Path
 
-import database.database as db
-import ui_import
-from parsers.file_parser import parse_csv
-from parsers.normalizer import map_columns, validate_and_clean
+import hr_management_app.src.ui_import as ui_import_mod
+from hr_management_app.src.database import database as db
 
 
 def test_importdialog_load_and_import(tmp_path, monkeypatch):
@@ -17,8 +13,26 @@ def test_importdialog_load_and_import(tmp_path, monkeypatch):
 
     # Create a CSV with a small typo in header to test fuzzy mapping
     csv_path = tmp_path / "employees_ui.csv"
-    headers = ["Full Name", "emal", "birthdate", "Job Title", "Role", "joined", "left", "contract"]
-    row = ["Bob Example", "bob@example.com", "1987-08-01", "Developer", "engineer", "2019", "", "permanent"]
+    headers = [
+        "Full Name",
+        "emal",
+        "birthdate",
+        "Job Title",
+        "Role",
+        "joined",
+        "left",
+        "contract",
+    ]
+    row = [
+        "Bob Example",
+        "bob@example.com",
+        "1987-08-01",
+        "Developer",
+        "engineer",
+        "2019",
+        "",
+        "permanent",
+    ]
 
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
@@ -30,17 +44,25 @@ def test_importdialog_load_and_import(tmp_path, monkeypatch):
     class DummyPreview:
         def __init__(self, parent, mapping_debug, prefill=None, prethreshold=None):
             # Simulate user accepting defaults (no changes)
-            self.mapping = {k: (v[0] if isinstance(v, (list, tuple)) else v, v[1] if isinstance(v, (list, tuple)) and len(v) > 1 else None) for k, v in (mapping_debug or {}).items()}
+            self.mapping = {
+                k: (
+                    v[0] if isinstance(v, (list, tuple)) else v,
+                    v[1] if isinstance(v, (list, tuple)) and len(v) > 1 else None,
+                )
+                for k, v in (mapping_debug or {}).items()
+            }
             self.threshold = prethreshold or 80
 
-    monkeypatch.setattr(ui_import, "MappingPreviewDialog", DummyPreview)
+    monkeypatch.setattr(ui_import_mod, "MappingPreviewDialog", DummyPreview)
     # Make ImportDialog.wait_window a no-op to avoid actual GUI wait for the preview dialog
-    monkeypatch.setattr(ui_import.ImportDialog, "wait_window", lambda self, win=None: None)
+    monkeypatch.setattr(
+        ui_import_mod.ImportDialog, "wait_window", lambda self, win=None: None
+    )
 
     # Create a hidden root and the ImportDialog
     root = tk.Tk()
     root.withdraw()
-    dlg = ui_import.ImportDialog(root)
+    dlg = ui_import_mod.ImportDialog(root)
     try:
         dlg.path_var.set(str(csv_path))
         dlg._load()

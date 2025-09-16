@@ -10,11 +10,18 @@ class Employee:
 
     def get_info(self):
         return {
-            'id': self.id,
-            'name': self.name,
-            'position': self.position,
-            'contracts': [c.get_details() if hasattr(c, "get_details") else {
-                "id": getattr(c, "id", None),
-                "terms": getattr(c, "terms", None)
-            } for c in self.contracts]
+            "id": self.id,
+            "name": self.name,
+            "position": self.position,
+            "contracts": [
+                (
+                    c.get_details()
+                    if hasattr(c, "get_details")
+                    else {
+                        "id": getattr(c, "id", None),
+                        "terms": getattr(c, "terms", None),
+                    }
+                )
+                for c in self.contracts
+            ],
         }

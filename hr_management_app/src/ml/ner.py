@@ -5,9 +5,10 @@ This module attempts to load spaCy and a language model. If spaCy is not
 available, it provides a conservative rule-based fallback so the rest of the
 app can function without ML dependencies.
 """
-from typing import Dict, Any, Tuple, List
+
 import logging
 import re
+from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
@@ -16,13 +17,16 @@ _nlp = None
 
 try:
     import spacy  # type: ignore
+
     # do not auto-download models here; user can install with `python -m spacy download en_core_web_sm`
     try:
         _nlp = spacy.load("en_core_web_sm")
         SPACY_AVAILABLE = True
     except Exception:
         # model not installed
-        logger.info("spaCy installed but model 'en_core_web_sm' not available; ML extraction disabled")
+        logger.info(
+            "spaCy installed but model 'en_core_web_sm' not available; ML extraction disabled"
+        )
         SPACY_AVAILABLE = False
 except Exception:
     SPACY_AVAILABLE = False

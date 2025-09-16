@@ -1,0 +1,13 @@
+{
+  "threshold": 80,
+  "mappings": {
+    "Full Name": "name",
+    "birthdate": "dob",
+    "Job Title": "job_title",
+    "Role": "role",
+    "joined": "year_start",
+    "left": "year_end",
+    "contract": "contract_type",
+    "emal": "email"
+  }
+}

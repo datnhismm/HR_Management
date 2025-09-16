@@ -1,8 +1,11 @@
 import re
-from typing import Dict, Any, List, Tuple
+from typing import Any, Dict, List, Tuple
+
 from dateutil import parser as dateparser
+
 try:
     from rapidfuzz import process as rf_process
+
     RAPIDFUZZ_AVAILABLE = True
 except Exception:
     RAPIDFUZZ_AVAILABLE = False
@@ -23,14 +26,17 @@ FIELD_ALIASES = {
 # Configurable fuzzy threshold (0-100). Can be adjusted by caller.
 FUZZY_THRESHOLD = 80
 
+
 def _normalize_key(k: str) -> str:
     k = k.strip().lower()
     k = re.sub(r"[_\s]+", " ", k)
     return k
 
-def map_columns(row: Dict[str, Any], fuzzy_threshold: int = FUZZY_THRESHOLD) -> Dict[str, Any]:
-    """Map input row keys to canonical field names. fuzzy_threshold controls minimum score for fuzzy matches.
-    """
+
+def map_columns(
+    row: Dict[str, Any], fuzzy_threshold: int = FUZZY_THRESHOLD
+) -> Dict[str, Any]:
+    """Map input row keys to canonical field names. fuzzy_threshold controls minimum score for fuzzy matches."""
     out = {}
     for k, v in row.items():
         nk = _normalize_key(str(k))
@@ -53,12 +59,19 @@ def map_columns(row: Dict[str, Any], fuzzy_threshold: int = FUZZY_THRESHOLD) -> 
             # try rapidfuzz first (if available)
             if RAPIDFUZZ_AVAILABLE:
                 try:
-                    fn = getattr(rf_process, 'extractOne', None)
+                    fn = getattr(rf_process, "extractOne", None)
                     if callable(fn):
                         res = fn(nk, choices)
-                        if res and res[1] >= fuzzy_threshold:
-                            match = res[0]
-                            mapped = key_map.get(match)
+                        # rapidfuzz may return None or a sequence like (match, score, _)
+                        if res and isinstance(res, (list, tuple)) and len(res) >= 2:
+                            score = res[1]
+                            try:
+                                sc_int = int(round(float(score)))
+                            except Exception:
+                                sc_int = None
+                            if sc_int is not None and sc_int >= fuzzy_threshold:
+                                match = res[0]
+                                mapped = key_map.get(match)
                 except Exception:
                     mapped = None
             # fallback to stdlib difflib for small typos or when rapidfuzz isn't available
@@ -66,7 +79,9 @@ def map_columns(row: Dict[str, Any], fuzzy_threshold: int = FUZZY_THRESHOLD) -> 
                 best = None
                 best_score = -1
                 for choice in choices:
-                    score = int(round(difflib.SequenceMatcher(None, nk, choice).ratio() * 100))
+                    score = int(
+                        round(difflib.SequenceMatcher(None, nk, choice).ratio() * 100)
+                    )
                     if score > best_score:
                         best_score = score
                         best = choice
@@ -77,7 +92,9 @@ def map_columns(row: Dict[str, Any], fuzzy_threshold: int = FUZZY_THRESHOLD) -> 
     return out
 
 
-def map_columns_debug(row: Dict[str, Any], fuzzy_threshold: int = FUZZY_THRESHOLD) -> Tuple[Dict[str, Any], Dict[str, Tuple[str, int]]]:
+def map_columns_debug(
+    row: Dict[str, Any], fuzzy_threshold: int = FUZZY_THRESHOLD
+) -> Tuple[Dict[str, Any], Dict[str, Tuple[str, int]]]:
     """Like map_columns but also return a debug map of original_key -> (canonical, score).
     Score is an int 0-100 when fuzzy matching was used, or None for exact matches.
     """
@@ -105,13 +122,16 @@ def map_columns_debug(row: Dict[str, Any], fuzzy_threshold: int = FUZZY_THRESHOL
                     key_map[a] = canonical
             if RAPIDFUZZ_AVAILABLE:
                 try:
-                    fn = getattr(rf_process, 'extractOne', None)
+                    fn = getattr(rf_process, "extractOne", None)
                     if callable(fn):
                         res = fn(nk, choices)
-                        if res:
-                            match = res[0]
-                            sc = int(round(res[1]))
-                            if sc >= fuzzy_threshold:
+                        if res and isinstance(res, (list, tuple)) and len(res) >= 2:
+                            try:
+                                sc = int(round(float(res[1])))
+                            except Exception:
+                                sc = None
+                            if sc is not None and sc >= fuzzy_threshold:
+                                match = res[0]
                                 mapped = key_map.get(match)
                                 score = sc
                 except Exception:
@@ -121,7 +141,9 @@ def map_columns_debug(row: Dict[str, Any], fuzzy_threshold: int = FUZZY_THRESHOL
                 best = None
                 best_score = -1
                 for choice in choices:
-                    sc = int(round(difflib.SequenceMatcher(None, nk, choice).ratio() * 100))
+                    sc = int(
+                        round(difflib.SequenceMatcher(None, nk, choice).ratio() * 100)
+                    )
                     if sc > best_score:
                         best_score = sc
                         best = choice
@@ -134,6 +156,7 @@ def map_columns_debug(row: Dict[str, Any], fuzzy_threshold: int = FUZZY_THRESHOL
         else:
             debug[str(k)] = (None, None)
     return out, debug
+
 
 def validate_and_clean(record: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
     """Return cleaned record and list of validation problems (empty if ok)."""
@@ -173,7 +196,9 @@ def validate_and_clean(record: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str
     out["job_title"] = record.get("job_title") or record.get("job") or None
 
     # role
-    out["role"] = (record.get("role") or "engineer").strip() if record.get("role") else "engineer"
+    out["role"] = (
+        (record.get("role") or "engineer").strip() if record.get("role") else "engineer"
+    )
 
     # years
     for key in ("year_start", "year_end"):

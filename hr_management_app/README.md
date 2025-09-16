@@ -1,55 +1,33 @@
 # Human Resource Management Application
 
-This project is a Human Resource Management application that allows for the storage and viewing of employee contracts. It is designed to help HR departments manage contracts efficiently.
+This repository contains a lightweight Human Resource Management application for storing and viewing employee contracts.
 
-## Project Structure
+## Quickstart
 
-```
-hr_management_app
-├── src
-│   ├── __init__.py
-│   ├── main.py
-│   ├── contracts
-│   │   ├── __init__.py
-│   │   ├── models.py
-│   │   └── views.py
-│   └── employees
-│       ├── __init__.py
-│       └── models.py
-├── requirements.txt
-└── README.md
+Clone and install dependencies:
+
+```bash
+git clone <repository-url>
+cd hr_management_app
+pip install -r requirements.txt
 ```
 
-## Installation
+Run the GUI (default):
 
-1. Clone the repository:
-   ```
-   git clone <repository-url>
-   cd hr_management_app
-   ```
-
-2. Install the required dependencies:
-   ```
-   pip install -r requirements.txt
-   ```
-
-## Usage
-
-To run the application, execute the following command:
-```
+```bash
 python src/main.py
 ```
 
-## Features
+Run the CLI:
 
-- Store and manage employee contracts.
-- View contracts associated with employees.
-- Easy to extend and modify for additional HR functionalities.
+```bash
+python src/main.py cli
+```
 
-## Contributing
+## Development
 
-Contributions are welcome! Please feel free to submit a pull request or open an issue for any enhancements or bug fixes.
+See `CONTRIBUTING.md` for recommended developer tooling (black, isort, ruff) and how to enable the included pre-commit hooks.
 
 ## License
 
-This project is licensed under the MIT License. See the LICENSE file for more details.
+This project is licensed under the MIT License. See the LICENSE file for details.
