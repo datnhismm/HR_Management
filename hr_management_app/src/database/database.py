@@ -57,9 +57,11 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS contracts (
                 id INTEGER PRIMARY KEY,
                 employee_id INTEGER,
+                construction_id INTEGER,
                 start_date TEXT,
                 end_date TEXT,
-                terms TEXT
+                terms TEXT,
+                contract_file_path TEXT
             )
         """
         )
@@ -158,6 +160,41 @@ def init_db() -> None:
         """
         )
         conn.commit()
+    # Migration: ensure contract_file_path column exists on older DBs
+    def _ensure_column(table: str, column: str, column_type: str = "TEXT") -> None:
+        try:
+            with _conn() as conn:
+                c = conn.cursor()
+                c.execute(f"PRAGMA table_info({table})")
+                cols = [r[1] for r in c.fetchall()]
+                if column not in cols:
+                    # ALTER TABLE add column is supported by SQLite and is idempotent here
+                    c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+                    conn.commit()
+        except Exception:
+            logger.exception("Failed to ensure column %s on table %s", column, table)
+
+    _ensure_column("contracts", "contract_file_path", "TEXT")
+    # ensure new construction_id column exists and migrate values from old employee_id if present
+    try:
+        with _conn() as conn:
+            c = conn.cursor()
+            c.execute("PRAGMA table_info(contracts)")
+            cols = [r[1] for r in c.fetchall()]
+            if "construction_id" not in cols:
+                c.execute("ALTER TABLE contracts ADD COLUMN construction_id INTEGER")
+                conn.commit()
+                # if employee_id exists, copy values into construction_id for backward compatibility
+                if "employee_id" in cols:
+                    try:
+                        c.execute(
+                            "UPDATE contracts SET construction_id = employee_id WHERE construction_id IS NULL AND employee_id IS NOT NULL"
+                        )
+                        conn.commit()
+                    except Exception:
+                        logger.exception("Failed to copy employee_id -> construction_id during migration")
+    except Exception:
+        logger.exception("Failed to ensure construction_id column on contracts table")
 
     def _safe_lastrowid(cursor) -> int:
         """Return an int lastrowid or 0 if None/invalid."""
@@ -248,15 +285,17 @@ def add_contract_to_db(contract) -> None:
         c = conn.cursor()
         c.execute(
             """
-            INSERT OR REPLACE INTO contracts (id, employee_id, start_date, end_date, terms)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO contracts (id, employee_id, construction_id, start_date, end_date, terms, contract_file_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
             (
                 contract.id,
                 contract.employee_id,
+                getattr(contract, "construction_id", None),
                 contract.start_date,
                 contract.end_date,
                 contract.terms,
+                getattr(contract, "file_path", None),
             ),
         )
         conn.commit()
@@ -265,7 +304,7 @@ def add_contract_to_db(contract) -> None:
 def get_all_contracts() -> List[Tuple]:
     with _conn() as conn:
         c = conn.cursor()
-        c.execute("SELECT id, employee_id, start_date, end_date, terms FROM contracts")
+        c.execute("SELECT id, employee_id, construction_id, start_date, end_date, terms, contract_file_path FROM contracts")
         return c.fetchall()
 
 

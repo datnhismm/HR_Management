@@ -7,6 +7,7 @@
     "Role": "role",
     "joined": "year_start",
     "left": "year_end",
-    "contract": "contract_type"
+    "contract": "contract_type",
+    "emal": "email"
   }
 }

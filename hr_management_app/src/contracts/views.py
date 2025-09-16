@@ -5,6 +5,12 @@ def display_contracts(contracts):
         print(f"Start Date: {contract.start_date}")
         print(f"End Date: {contract.end_date}")
         print(f"Terms: {contract.terms}")
+        # file if present
+        try:
+            if getattr(contract, "file_path", None):
+                print(f"File: {contract.file_path}")
+        except Exception:
+            pass
         # show subsets if present
         try:
             from .models import contract_progress
@@ -26,6 +32,11 @@ def view_contract(contract):
     print(f"Start Date: {contract.start_date}")
     print(f"End Date: {contract.end_date}")
     print(f"Terms: {contract.terms}")
+    try:
+        if getattr(contract, "file_path", None):
+            print(f"Attached file: {contract.file_path}")
+    except Exception:
+        pass
     # show subsets
     try:
         from .models import contract_progress

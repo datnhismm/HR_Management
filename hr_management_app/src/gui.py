@@ -2,7 +2,9 @@ import logging
 import os
 import tkinter as tk
 from datetime import datetime
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import messagebox, simpledialog, ttk, filedialog
+import subprocess
+import sys
 from types import SimpleNamespace
 from typing import Optional
 
@@ -599,7 +601,8 @@ class HRApp(tk.Tk):
         add_frame = ttk.LabelFrame(right_frame, text="Add Contract", padding=10)
         add_frame.pack(fill="x", pady=(0, 10))
         self.entry_cid = tk.StringVar()
-        self.entry_eid = tk.StringVar()
+        # now used for construction-specific contracts
+        self.entry_construction_id = tk.StringVar()
         self.entry_start = tk.StringVar()
         self.entry_end = tk.StringVar()
         self.entry_terms = tk.StringVar()
@@ -607,8 +610,8 @@ class HRApp(tk.Tk):
         ttk.Entry(add_frame, textvariable=self.entry_cid).grid(
             row=0, column=1, sticky="ew"
         )
-        ttk.Label(add_frame, text="Employee ID").grid(row=1, column=0, sticky="w")
-        ttk.Entry(add_frame, textvariable=self.entry_eid).grid(
+        ttk.Label(add_frame, text="Construction ID").grid(row=1, column=0, sticky="w")
+        ttk.Entry(add_frame, textvariable=self.entry_construction_id).grid(
             row=1, column=1, sticky="ew"
         )
         ttk.Label(add_frame, text="Start (YYYY-MM-DD)").grid(
@@ -625,11 +628,20 @@ class HRApp(tk.Tk):
         ttk.Entry(add_frame, textvariable=self.entry_terms).grid(
             row=4, column=1, sticky="ew"
         )
+        # file attachment
+        self.contract_file_path_var = tk.StringVar()
+        ttk.Button(
+            add_frame,
+            text="Attach File",
+            command=lambda: self.pick_contract_file(parent=self),
+        ).grid(row=5, column=0, sticky="w", pady=(6, 0))
+        self.file_lbl = ttk.Label(add_frame, textvariable=self.contract_file_path_var)
+        self.file_lbl.grid(row=5, column=1, sticky="w", pady=(6, 0))
         add_frame.columnconfigure(1, weight=1)
         self.add_contract_btn = ttk.Button(
             add_frame, text="Add Contract", command=self.add_contract
         )
-        self.add_contract_btn.grid(row=5, column=0, columnspan=2, pady=(8, 0))
+        self.add_contract_btn.grid(row=6, column=0, columnspan=2, pady=(8, 0))
 
         if self.user_role not in ("admin", "high_manager"):
             self.add_contract_btn.config(state="disabled")
@@ -787,10 +799,18 @@ class HRApp(tk.Tk):
         try:
             rows = get_all_contracts()
             for row in rows:
-                cid, eid, start, end, terms = row
-                self.contracts_list.insert(
-                    tk.END, f"{cid} | Emp:{eid} | {start} → {end}"
-                )
+                # support multiple row shapes; prefer construction_id when present
+                if len(row) >= 7:
+                    cid, eid, cons_id, start, end, terms, fpath = row
+                elif len(row) == 6:
+                    cid, eid, start, end, terms, fpath = row
+                    cons_id = None
+                else:
+                    cid, eid, start, end, terms = row
+                    cons_id = None
+                    fpath = None
+                label = f"{cid} | Cons:{cons_id or 'N/A'} | Emp:{eid or 'N/A'} | {start} → {end}"
+                self.contracts_list.insert(tk.END, label)
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load contracts:\n{e}")
 
@@ -811,12 +831,39 @@ class HRApp(tk.Tk):
 
             contract = Contract.retrieve_contract(int(cid))
             if contract:
-                from contracts.views import view_contract
-
-                view_contract(contract)
+                # show a details window with an Open File button when applicable
                 details = contract.get_details()
-                detail_text = "\n".join(f"{k}: {v}" for k, v in details.items())
-                messagebox.showinfo("Contract Details", detail_text)
+                win = tk.Toplevel(self)
+                win.title(f"Contract {contract.id}")
+                frm = ttk.Frame(win, padding=8)
+                frm.pack(fill="both", expand=True)
+                text = tk.Text(frm, height=12, width=60)
+                text.insert("1.0", "\n".join(f"{k}: {v}" for k, v in details.items()))
+                text.config(state="disabled")
+                text.pack(fill="both", expand=True)
+                btn_fr = ttk.Frame(frm)
+                btn_fr.pack(fill="x", pady=(6, 0))
+                # open attached file if present
+                file_path = getattr(contract, "file_path", None)
+                if file_path:
+                    def _open():
+                        try:
+                            if sys.platform == "win32":
+                                os.startfile(file_path)  # type: ignore[attr-defined]
+                            elif sys.platform == "darwin":
+                                subprocess.run(["open", file_path], check=False)
+                            else:
+                                subprocess.run(["xdg-open", file_path], check=False)
+                        except Exception as e:
+                            messagebox.showerror("Open File", f"Failed to open file: {e}")
+
+                    ttk.Button(btn_fr, text="Open Attached File", command=_open).pack(
+                        side="left", padx=4
+                    )
+                ttk.Button(btn_fr, text="Close", command=win.destroy).pack(
+                    side="right", padx=4
+                )
+                self.wait_window(win)
             else:
                 messagebox.showinfo("Not found", "Contract not found in DB.")
         except Exception as e:
@@ -825,7 +872,7 @@ class HRApp(tk.Tk):
     def add_contract(self):
         try:
             cid_text = self.entry_cid.get().strip()
-            eid_text = self.entry_eid.get().strip()
+            eid_text = self.entry_construction_id.get().strip()
             start = self.entry_start.get().strip()
             end = self.entry_end.get().strip()
             terms = self.entry_terms.get().strip()
@@ -840,19 +887,28 @@ class HRApp(tk.Tk):
                 messagebox.showerror("Validation", str(ve), parent=self)
                 return
 
-            # verify employee exists
-            if get_employee_by_id(eid) is None:
-                messagebox.showerror(
-                    "Validation", f"Employee id {eid} does not exist.", parent=self
-                )
-                return
+            # note: construction_id is independent of employees; skip employee validation
+
+            # if a file was attached, store it and set file_path
+            file_path = self.contract_file_path_var.get() or None
+            stored_path = None
+            if file_path:
+                try:
+                    from contracts.models import store_contract_file
+
+                    stored_path = store_contract_file(file_path, construction_id=eid)
+                except Exception:
+                    # continue without stored path
+                    stored_path = None
 
             c = SimpleNamespace(
                 id=cid,
-                employee_id=eid,
+                employee_id=None,
+                construction_id=eid,
                 start_date=start_iso,
                 end_date=end_iso,
                 terms=terms,
+                file_path=stored_path,
             )
             add_contract_to_db(c)
             messagebox.showinfo("Success", "Contract added.", parent=self)
@@ -863,10 +919,22 @@ class HRApp(tk.Tk):
 
     def clear_add_fields(self):
         self.entry_cid.set("")
-        self.entry_eid.set("")
+        self.entry_construction_id.set("")
         self.entry_start.set("")
         self.entry_end.set("")
         self.entry_terms.set("")
+        self.contract_file_path_var.set("")
+
+
+    def pick_contract_file(self, parent=None):
+        """Open a file picker for pdf/docx and set the selected path into the UI var."""
+        try:
+            filetypes = [("PDF files", "*.pdf"), ("Word documents", "*.docx"), ("All files", "*")]
+            path = filedialog.askopenfilename(title="Select contract file", filetypes=filetypes, parent=parent)
+            if path:
+                self.contract_file_path_var.set(path)
+        except Exception as e:
+            messagebox.showerror("File select", str(e), parent=parent)
 
     def toggle_check(self):
         if not self.employee_id:
