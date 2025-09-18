@@ -1,4 +1,5 @@
 """Forwarding package for contracts used by tools/tests."""
+
 try:
     from hr_management_app.src.contracts import models as models
     from hr_management_app.src.contracts import views as views

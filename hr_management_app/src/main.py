@@ -2,8 +2,8 @@ import logging
 import sys
 from typing import Optional
 
-from contracts.models import Contract
-from contracts.views import display_contracts
+from hr_management_app.src.contracts.models import Contract
+from hr_management_app.src.contracts.views import display_contracts
 from hr_management_app.src.database.database import (
     add_contract_to_db,
     calculate_salary,

@@ -61,13 +61,14 @@ class SignUpWindow(tk.Toplevel):
         ttk.Entry(frm, textvariable=self.job_var).grid(row=row, column=1, sticky="ew")
         row += 1
 
+        # Role selection is not changeable at signup. New users default to 'engineer'.
         ttk.Label(frm, text="Role:").grid(row=row, column=0, sticky="e")
-        self.role_var = tk.StringVar()
+        self.role_var = tk.StringVar(value="engineer")
+        # Use a disabled combobox to show the default role without allowing edits.
         self.role_combo = ttk.Combobox(
-            frm, textvariable=self.role_var, values=ALLOWED_ROLES, state="readonly"
+            frm, textvariable=self.role_var, values=ALLOWED_ROLES, state="disabled"
         )
         self.role_combo.grid(row=row, column=1, sticky="ew")
-        self.role_combo.set(ALLOWED_ROLES[0])
         row += 1
 
         ttk.Label(frm, text="Year start:").grid(row=row, column=0, sticky="e")

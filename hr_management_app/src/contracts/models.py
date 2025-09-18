@@ -1,8 +1,8 @@
-from dataclasses import asdict, dataclass
-from typing import Dict, List, Optional
 import os
 import shutil
 import time
+from dataclasses import asdict, dataclass
+from typing import Dict, List, Optional
 
 from hr_management_app.src.database.database import _conn
 
@@ -44,10 +44,18 @@ class Contract:
     employee_id: Optional[int] = None
     # construction-specific identifier (separate from employee)
     construction_id: Optional[int] = None
+    # hierarchical parent contract id (for subcontracts)
+    parent_contract_id: Optional[int] = None
+    # metadata
+    area: Optional[str] = None
+    incharge: Optional[str] = None
     start_date: str = ""
     end_date: str = ""
     terms: str = ""
     file_path: Optional[str] = None
+    # soft-delete metadata
+    deleted: bool = False
+    deleted_at: Optional[str] = None
 
     def __repr__(self) -> str:
         return f"Contract(id={self.id}, employee_id={self.employee_id}, start={self.start_date}, end={self.end_date})"
@@ -71,13 +79,24 @@ class Contract:
         with _conn() as conn:
             c = conn.cursor()
             c.execute(
-                "INSERT OR REPLACE INTO contracts (id, employee_id, construction_id, start_date, end_date, terms, contract_file_path) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR REPLACE INTO contracts (id, employee_id, construction_id, parent_contract_id, start_date, end_date, area, incharge, terms, contract_file_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     self.id,
                     int(self.employee_id) if self.employee_id is not None else None,
-                    int(self.construction_id) if self.construction_id is not None else None,
+                    (
+                        int(self.construction_id)
+                        if self.construction_id is not None
+                        else None
+                    ),
+                    (
+                        int(self.parent_contract_id)
+                        if self.parent_contract_id is not None
+                        else None
+                    ),
                     self.start_date,
                     self.end_date,
+                    self.area,
+                    self.incharge,
                     self.terms,
                     self.file_path,
                 ),
@@ -98,10 +117,17 @@ class Contract:
             )
 
     def delete(self) -> None:
-        """Delete this contract from DB."""
-        with _conn() as conn:
-            c = conn.cursor()
-            c.execute("DELETE FROM contracts WHERE id = ?", (self.id,))
+        """Soft-delete this contract via DB helper (marks deleted flag)."""
+        try:
+            from hr_management_app.src.database.database import soft_delete_contract
+
+            soft_delete_contract(self.id, cascade=False)
+            self.deleted = True
+        except Exception:
+            # fallback to hard delete if helper isn't available
+            with _conn() as conn:
+                c = conn.cursor()
+                c.execute("DELETE FROM contracts WHERE id = ?", (self.id,))
 
     def get_details(self) -> Dict:
         """Return contract data as a dict (used by UI)."""
@@ -114,20 +140,24 @@ class Contract:
         # Older shapes may be (id, employee_id, start_date, end_date, terms[, contract_file_path])
         if not row:
             raise ValueError("Empty row provided to Contract.from_row")
-        if len(row) == 7:
-            # id, employee_id, construction_id, start_date, end_date, terms, file
+        # New expected shape includes parent_contract_id, area, incharge
+        if len(row) >= 10:
+            # id, employee_id, construction_id, parent_contract_id, start_date, end_date, area, incharge, terms, file
             return cls(
                 id=row[0],
-                construction_id=row[2],
                 employee_id=row[1],
-                start_date=row[3],
-                end_date=row[4],
-                terms=row[5],
-                file_path=row[6],
+                construction_id=row[2],
+                parent_contract_id=row[3],
+                start_date=row[4],
+                end_date=row[5],
+                area=row[6],
+                incharge=row[7],
+                terms=row[8],
+                file_path=row[9],
             )
         # legacy 6-column where last is file path
         if len(row) == 6:
-            # id, employee_id, start_date, end_date, terms, file
+            # legacy 6-column where last is file path
             return cls(
                 id=row[0],
                 construction_id=None,
@@ -149,27 +179,66 @@ class Contract:
                 file_path=None,
             )
         # fallback: attempt best-effort mapping
-        return cls(id=row[0], construction_id=None, employee_id=row[1], start_date=row[2], end_date=row[3], terms=str(row[4]), file_path=(row[5] if len(row) > 5 else None))
+        return cls(
+            id=row[0],
+            construction_id=None,
+            employee_id=row[1],
+            start_date=row[2],
+            end_date=row[3],
+            terms=str(row[4]),
+            file_path=(row[5] if len(row) > 5 else None),
+        )
 
     @classmethod
     def retrieve_contract(cls, id: int) -> Optional["Contract"]:
         with _conn() as conn:
             c = conn.cursor()
-            c.execute(
-                "SELECT id, employee_id, construction_id, start_date, end_date, terms, contract_file_path FROM contracts WHERE id = ?",
-                (id,),
-            )
-            row = c.fetchone()
+            # try the full row shape including deleted columns
+            try:
+                c.execute(
+                    "SELECT id, employee_id, construction_id, parent_contract_id, start_date, end_date, area, incharge, terms, contract_file_path, deleted, deleted_at FROM contracts WHERE id = ?",
+                    (id,),
+                )
+                row = c.fetchone()
+            except Exception:
+                c.execute(
+                    "SELECT id, employee_id, construction_id, start_date, end_date, terms, contract_file_path FROM contracts WHERE id = ?",
+                    (id,),
+                )
+                row = c.fetchone()
         return cls.from_row(row) if row else None
 
     @classmethod
     def all_contracts(cls) -> List["Contract"]:
-        with _conn() as conn:
-            c = conn.cursor()
-            c.execute(
-                "SELECT id, employee_id, construction_id, start_date, end_date, terms, contract_file_path FROM contracts"
+        # Use DB helper to exclude trashed contracts by default
+        try:
+            from hr_management_app.src.database.database import (
+                get_all_contracts_filtered,
             )
-            rows = c.fetchall()
+
+            rows = get_all_contracts_filtered(include_deleted=False)
+        except Exception:
+            with _conn() as conn:
+                c = conn.cursor()
+                c.execute(
+                    "SELECT id, employee_id, construction_id, start_date, end_date, terms, contract_file_path FROM contracts"
+                )
+                rows = c.fetchall()
+        return [cls.from_row(r) for r in rows]
+
+    @classmethod
+    def search(cls, term: str, include_deleted: bool = False, limit: Optional[int] = None) -> List["Contract"]:
+        """Search for contracts using a free-text term. Returns Contract objects."""
+        try:
+            from hr_management_app.src.database.database import search_contracts
+
+            rows = search_contracts(term, include_deleted=include_deleted, limit=limit)
+        except Exception:
+            # fallback: filter in-memory
+            rows = cls.all_contracts()
+            term_low = (term or "").lower()
+            rows = [r for r in rows if term_low in (r.terms or "").lower()]
+            return rows
         return [cls.from_row(r) for r in rows]
 
 

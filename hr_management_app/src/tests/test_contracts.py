@@ -1,3 +1,11 @@
+import os
+import tempfile
+
+# ensure tests use an isolated DB file
+os.environ["HR_MANAGEMENT_TEST_DB"] = os.path.join(
+    tempfile.gettempdir(), "hr_mgmt_test.db"
+)
+
 from hr_management_app.src.contracts.models import Contract, contract_progress
 from hr_management_app.src.database import database as db
 from hr_management_app.src.database.database import (
@@ -5,6 +13,17 @@ from hr_management_app.src.database.database import (
     create_contract_subset,
     update_subset_status,
 )
+
+
+def setup_module():
+    # ensure fresh test DB for this module
+    try:
+        path = os.environ.get("HR_MANAGEMENT_TEST_DB")
+        if path and os.path.exists(path):
+            os.remove(path)
+    except Exception:
+        pass
+    db.init_db()
 
 
 def test_contract_progress_and_permissions(tmp_path):

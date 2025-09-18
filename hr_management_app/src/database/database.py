@@ -38,6 +38,16 @@ def _conn():
     else:
         path = os.path.join(os.path.dirname(__file__), DB_NAME)
     conn = sqlite3.connect(path)
+    # ensure core schema exists for this connection (helps tests that change the env var)
+    try:
+        c = conn.cursor()
+        c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'")
+        if not c.fetchone():
+            # create tables on this connection
+            _create_tables(conn)
+    except Exception:
+        # best-effort; if something goes wrong, let callers handle errors
+        pass
     try:
         yield conn
         # commit is usually explicit in callers; do not auto-commit here
@@ -51,115 +61,158 @@ def _conn():
 def init_db() -> None:
     """Create required tables if missing."""
     with _conn() as conn:
-        c = conn.cursor()
-        c.execute(
-            """
-            CREATE TABLE IF NOT EXISTS contracts (
-                id INTEGER PRIMARY KEY,
-                employee_id INTEGER,
-                construction_id INTEGER,
-                start_date TEXT,
-                end_date TEXT,
-                terms TEXT,
-                contract_file_path TEXT
-            )
+        _create_tables(conn)
+
+
+def _create_tables(conn) -> None:
+    """Create core tables on the given sqlite3 connection object."""
+    c = conn.cursor()
+    c.execute(
         """
+        CREATE TABLE IF NOT EXISTS contracts (
+            id INTEGER PRIMARY KEY,
+            employee_id INTEGER,
+            construction_id INTEGER,
+            parent_contract_id INTEGER,
+            area TEXT,
+            incharge TEXT,
+            start_date TEXT,
+            end_date TEXT,
+            terms TEXT,
+            contract_file_path TEXT
         )
-        # Contract subsets (each contract can have many subsets/phases/tasks)
-        c.execute(
-            """
-            CREATE TABLE IF NOT EXISTS contract_subsets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                contract_id INTEGER,
-                title TEXT,
-                description TEXT,
-                status TEXT,
-                order_index INTEGER DEFAULT 0
-            )
+    """
+    )
+    # Contract subsets (each contract can have many subsets/phases/tasks)
+    c.execute(
         """
+        CREATE TABLE IF NOT EXISTS contract_subsets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            contract_id INTEGER,
+            title TEXT,
+            description TEXT,
+            status TEXT,
+            order_index INTEGER DEFAULT 0
         )
-        # History of status changes for contract subsets
-        c.execute(
-            """
-            CREATE TABLE IF NOT EXISTS subset_status_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                subset_id INTEGER,
-                old_status TEXT,
-                new_status TEXT,
-                actor_user_id INTEGER,
-                changed_at TEXT
-            )
+    """
+    )
+    # History of status changes for contract subsets
+    c.execute(
         """
+        CREATE TABLE IF NOT EXISTS subset_status_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            subset_id INTEGER,
+            old_status TEXT,
+            new_status TEXT,
+            actor_user_id INTEGER,
+            changed_at TEXT
         )
-        c.execute(
-            """
-            CREATE TABLE IF NOT EXISTS attendance (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                employee_id INTEGER,
-                check_in TEXT,
-                check_out TEXT
-            )
+    """
+    )
+    c.execute(
         """
+        CREATE TABLE IF NOT EXISTS attendance (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            employee_id INTEGER,
+            check_in TEXT,
+            check_out TEXT
         )
-        c.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL,
-                salt TEXT NOT NULL,
-                reset_token TEXT,
-                reset_expiry TEXT,
-                totp_secret TEXT,
-                role TEXT DEFAULT 'engineer'
-            )
+    """
+    )
+    c.execute(
         """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            salt TEXT NOT NULL,
+            reset_token TEXT,
+            reset_expiry TEXT,
+            totp_secret TEXT,
+            role TEXT DEFAULT 'engineer'
         )
-        c.execute(
-            """
-            CREATE TABLE IF NOT EXISTS employees (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER UNIQUE,
-                employee_number INTEGER UNIQUE,
-                name TEXT,
-                dob TEXT,
-                job_title TEXT,
-                role TEXT,
-                year_start INTEGER,
-                year_end INTEGER,
-                profile_pic TEXT,
-                contract_type TEXT,
-                FOREIGN KEY(user_id) REFERENCES users(id)
-            )
+    """
+    )
+    c.execute(
         """
+        CREATE TABLE IF NOT EXISTS employees (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER UNIQUE,
+            employee_number INTEGER UNIQUE,
+            name TEXT,
+            dob TEXT,
+            job_title TEXT,
+            role TEXT,
+            year_start INTEGER,
+            year_end INTEGER,
+            profile_pic TEXT,
+            contract_type TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(id)
         )
-        c.execute(
-            """
-            CREATE TABLE IF NOT EXISTS role_audit (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                changed_user_id INTEGER,
-                old_role TEXT,
-                new_role TEXT,
-                actor_user_id INTEGER,
-                changed_at TEXT
-            )
+    """
+    )
+    # Create useful indices for search performance
+    try:
+        c.execute("CREATE INDEX IF NOT EXISTS idx_employees_employee_number ON employees(employee_number)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_employees_name ON employees(name)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_contracts_construction_id ON contracts(construction_id)")
+    except Exception:
+        # ignore if index creation unsupported
+        pass
+    c.execute(
         """
+        CREATE TABLE IF NOT EXISTS role_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            changed_user_id INTEGER,
+            old_role TEXT,
+            new_role TEXT,
+            actor_user_id INTEGER,
+            changed_at TEXT
         )
-        c.execute(
-            """
-            CREATE TABLE IF NOT EXISTS imputation_audit (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                row_index INTEGER,
-                field TEXT,
-                old_value TEXT,
-                new_value TEXT,
-                source TEXT,
-                actor_user_id INTEGER,
-                applied_at TEXT
-            )
+    """
+    )
+    c.execute(
         """
+        CREATE TABLE IF NOT EXISTS imputation_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            row_index INTEGER,
+            field TEXT,
+            old_value TEXT,
+            new_value TEXT,
+            source TEXT,
+            actor_user_id INTEGER,
+            applied_at TEXT
+        )
+    """
+    )
+    conn.commit()
+
+    # Create FTS5 virtual table for contracts text search (terms, area, incharge)
+    try:
+        # Create a shadow FTS table and triggers if not present
+        c.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS contracts_fts USING fts5(terms, area, incharge, content='contracts', content_rowid='id')"
+        )
+        # Triggers to keep FTS in sync
+        c.executescript(
+            """
+            CREATE TRIGGER IF NOT EXISTS contracts_ai AFTER INSERT ON contracts BEGIN
+                INSERT INTO contracts_fts(rowid, terms, area, incharge) VALUES (new.id, new.terms, new.area, new.incharge);
+            END;
+            CREATE TRIGGER IF NOT EXISTS contracts_ad AFTER DELETE ON contracts BEGIN
+                INSERT INTO contracts_fts(contracts_fts, rowid, terms, area, incharge) VALUES('delete', old.id, old.terms, old.area, old.incharge);
+            END;
+            CREATE TRIGGER IF NOT EXISTS contracts_au AFTER UPDATE ON contracts BEGIN
+                INSERT INTO contracts_fts(contracts_fts, rowid, terms, area, incharge) VALUES('delete', old.id, old.terms, old.area, old.incharge);
+                INSERT INTO contracts_fts(rowid, terms, area, incharge) VALUES (new.id, new.terms, new.area, new.incharge);
+            END;
+            """
         )
         conn.commit()
+    except Exception:
+        # FTS may not be available in the SQLite build; that's fine — fall back to LIKE queries
+        pass
+
     # Migration: ensure contract_file_path column exists on older DBs
     def _ensure_column(table: str, column: str, column_type: str = "TEXT") -> None:
         try:
@@ -175,6 +228,13 @@ def init_db() -> None:
             logger.exception("Failed to ensure column %s on table %s", column, table)
 
     _ensure_column("contracts", "contract_file_path", "TEXT")
+    # ensure new columns for hierarchical contracts exist
+    _ensure_column("contracts", "parent_contract_id", "INTEGER")
+    _ensure_column("contracts", "area", "TEXT")
+    _ensure_column("contracts", "incharge", "TEXT")
+    # soft-delete support
+    _ensure_column("contracts", "deleted", "INTEGER DEFAULT 0")
+    _ensure_column("contracts", "deleted_at", "TEXT")
     # ensure new construction_id column exists and migrate values from old employee_id if present
     try:
         with _conn() as conn:
@@ -192,7 +252,9 @@ def init_db() -> None:
                         )
                         conn.commit()
                     except Exception:
-                        logger.exception("Failed to copy employee_id -> construction_id during migration")
+                        logger.exception(
+                            "Failed to copy employee_id -> construction_id during migration"
+                        )
     except Exception:
         logger.exception("Failed to ensure construction_id column on contracts table")
 
@@ -285,15 +347,18 @@ def add_contract_to_db(contract) -> None:
         c = conn.cursor()
         c.execute(
             """
-            INSERT OR REPLACE INTO contracts (id, employee_id, construction_id, start_date, end_date, terms, contract_file_path)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO contracts (id, employee_id, construction_id, parent_contract_id, start_date, end_date, area, incharge, terms, contract_file_path)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
             (
                 contract.id,
                 contract.employee_id,
                 getattr(contract, "construction_id", None),
+                getattr(contract, "parent_contract_id", None),
                 contract.start_date,
                 contract.end_date,
+                getattr(contract, "area", None),
+                getattr(contract, "incharge", None),
                 contract.terms,
                 getattr(contract, "file_path", None),
             ),
@@ -304,7 +369,108 @@ def add_contract_to_db(contract) -> None:
 def get_all_contracts() -> List[Tuple]:
     with _conn() as conn:
         c = conn.cursor()
-        c.execute("SELECT id, employee_id, construction_id, start_date, end_date, terms, contract_file_path FROM contracts")
+        # prefer shape with deleted columns when present; fall back if older DB
+        try:
+            c.execute(
+                "SELECT id, employee_id, construction_id, parent_contract_id, start_date, end_date, area, incharge, terms, contract_file_path, deleted, deleted_at FROM contracts"
+            )
+            return c.fetchall()
+        except Exception:
+            # older DB without deleted columns
+            c.execute(
+                "SELECT id, employee_id, construction_id, parent_contract_id, start_date, end_date, area, incharge, terms, contract_file_path FROM contracts"
+            )
+            return c.fetchall()
+
+
+def get_all_contracts_filtered(include_deleted: bool = False) -> List[Tuple]:
+    """Return contracts rows; by default exclude soft-deleted rows.
+
+    If include_deleted is True, return all rows including deleted ones.
+    The returned row shape prefers the full set of columns (including deleted/deleted_at) when available.
+    """
+    with _conn() as conn:
+        c = conn.cursor()
+        # attempt to use deleted column in WHERE; if missing, fall back to simple select
+        try:
+            if include_deleted:
+                c.execute(
+                    "SELECT id, employee_id, construction_id, parent_contract_id, start_date, end_date, area, incharge, terms, contract_file_path, deleted, deleted_at FROM contracts"
+                )
+            else:
+                c.execute(
+                    "SELECT id, employee_id, construction_id, parent_contract_id, start_date, end_date, area, incharge, terms, contract_file_path, deleted, deleted_at FROM contracts WHERE deleted = 0"
+                )
+            return c.fetchall()
+        except Exception:
+            # older DB without deleted column
+            c.execute(
+                "SELECT id, employee_id, construction_id, parent_contract_id, start_date, end_date, area, incharge, terms, contract_file_path FROM contracts"
+            )
+            return c.fetchall()
+
+
+def search_contracts(term: str, include_deleted: bool = False, limit: Optional[int] = None) -> List[Tuple]:
+    """Search contracts by id, area, incharge, terms, or construction_id.
+
+    term: search string; numeric strings will be matched against id and construction_id.
+    include_deleted: include soft-deleted rows when True.
+    limit: optional cap on returned rows.
+    Returns list of rows in the same shape as get_all_contracts_filtered.
+    """
+    term = (term or "").strip()
+    term = (term or "").strip()
+    with _conn() as conn:
+        c = conn.cursor()
+        # Prefer FTS5 when available for text search
+        try:
+            # check if FTS table exists
+            c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='contracts_fts'")
+            if c.fetchone() and term:
+                # Use MATCH for fts5; numeric terms should match id/construction_id OR the FTS match
+                params: List[object] = []
+                search_or: List[str] = []
+                if term.isdigit():
+                    search_or.append("(id = ? OR construction_id = ?)")
+                    params.extend([int(term), int(term)])
+                # FTS MATCH query (match against terms, area, incharge)
+                search_or.append("id IN (SELECT rowid FROM contracts_fts WHERE contracts_fts MATCH ?)")
+                params.append(term)
+                where = []
+                where.append("(" + " OR ".join(search_or) + ")")
+                if not include_deleted:
+                    where.append("(deleted IS NULL OR deleted = 0)")
+                sql = "SELECT id, employee_id, construction_id, parent_contract_id, start_date, end_date, area, incharge, terms, contract_file_path, deleted, deleted_at FROM contracts WHERE " + " AND ".join(where) + " ORDER BY id DESC"
+                if limit and int(limit) > 0:
+                    sql += f" LIMIT {int(limit)}"
+                c.execute(sql, tuple(params))
+                return c.fetchall()
+        except Exception:
+            # if anything goes wrong with FTS, fall back
+            pass
+
+        # Fallback to LIKE-based search (older SQLite)
+        params: List[object] = []
+        search_parts: List[str] = []
+        if term:
+            like = f"%{term}%"
+            search_parts.append("(area LIKE ? OR incharge LIKE ? OR terms LIKE ?)")
+            params.extend([like, like, like])
+            if term.isdigit():
+                search_parts.append("(id = ? OR construction_id = ?)")
+                params.extend([int(term), int(term)])
+        where_clauses: List[str] = []
+        if search_parts:
+            where_clauses.append("(" + " OR ".join(search_parts) + ")")
+        if not include_deleted:
+            where_clauses.append("(deleted IS NULL OR deleted = 0)")
+        where_sql = ""
+        if where_clauses:
+            where_sql = " WHERE " + " AND ".join(where_clauses)
+        limit_sql = f" LIMIT {int(limit)}" if limit and int(limit) > 0 else ""
+        base = "SELECT id, employee_id, construction_id, parent_contract_id, start_date, end_date, area, incharge, terms, contract_file_path, deleted, deleted_at FROM contracts"
+        sql = base + where_sql + " ORDER BY id DESC" + limit_sql
+        c.execute(sql, tuple(params))
         return c.fetchall()
 
 
@@ -386,6 +552,233 @@ def get_subsets_for_contract(contract_id: int) -> List[Tuple]:
             (contract_id,),
         )
         return c.fetchall()
+
+
+def get_child_contracts(contract_id: int) -> List[Tuple]:
+    """Return list of contracts that have parent_contract_id == contract_id."""
+    with _conn() as conn:
+        c = conn.cursor()
+        c.execute(
+            "SELECT id, employee_id, construction_id, parent_contract_id, start_date, end_date, area, incharge, terms, contract_file_path FROM contracts WHERE parent_contract_id = ?",
+            (contract_id,),
+        )
+        return c.fetchall()
+
+
+def get_subsets_count(contract_id: int) -> int:
+    with _conn() as conn:
+        c = conn.cursor()
+        c.execute(
+            "SELECT COUNT(1) FROM contract_subsets WHERE contract_id = ?",
+            (contract_id,),
+        )
+        row = c.fetchone()
+        return int(row[0]) if row and row[0] else 0
+
+
+def get_contract_by_id(
+    contract_id: int, include_deleted: bool = False
+) -> Optional[Tuple]:
+    """Return a single contract row by id. If include_deleted is False, only returns non-deleted rows.
+
+    Returns None if not found. The returned tuple follows the `get_all_contracts` shape when possible.
+    """
+    with _conn() as conn:
+        c = conn.cursor()
+        try:
+            if include_deleted:
+                c.execute(
+                    "SELECT id, employee_id, construction_id, parent_contract_id, start_date, end_date, area, incharge, terms, contract_file_path, deleted, deleted_at FROM contracts WHERE id = ?",
+                    (contract_id,),
+                )
+            else:
+                c.execute(
+                    "SELECT id, employee_id, construction_id, parent_contract_id, start_date, end_date, area, incharge, terms, contract_file_path, deleted, deleted_at FROM contracts WHERE id = ? AND (deleted IS NULL OR deleted = 0)",
+                    (contract_id,),
+                )
+            row = c.fetchone()
+            return row
+        except Exception:
+            # older DBs may not have deleted columns
+            c.execute(
+                "SELECT id, employee_id, construction_id, parent_contract_id, start_date, end_date, area, incharge, terms, contract_file_path FROM contracts WHERE id = ?",
+                (contract_id,),
+            )
+            return c.fetchone()
+
+
+def soft_delete_contract(contract_id: int, cascade: bool = True) -> None:
+    """Mark a contract (and optionally descendants) as deleted (soft delete).
+
+    This sets contracts.deleted = 1 and deleted_at to now(). Subsets are not removed so they can be restored with the contract.
+    """
+    try:
+        from datetime import datetime
+
+        when = datetime.now().isoformat()
+        with _conn() as conn:
+            c = conn.cursor()
+            # collect all descendant contract ids (DFS)
+            to_mark = [int(contract_id)]
+            if cascade:
+                stack = [int(contract_id)]
+                while stack:
+                    cur = stack.pop()
+                    c.execute(
+                        "SELECT id FROM contracts WHERE parent_contract_id = ?", (cur,)
+                    )
+                    rows = c.fetchall()
+                    for r in rows:
+                        cid = int(r[0])
+                        to_mark.append(cid)
+                        stack.append(cid)
+
+            for cid in set(to_mark):
+                try:
+                    c.execute(
+                        "UPDATE contracts SET deleted = 1, deleted_at = ? WHERE id = ?",
+                        (when, cid),
+                    )
+                except Exception:
+                    # best-effort per-row update
+                    logger.exception("Failed to soft-delete contract %s", cid)
+            conn.commit()
+    except Exception:
+        logger.exception("Failed to soft-delete contract %s", contract_id)
+        raise
+
+
+def restore_contract(contract_id: int, cascade: bool = True) -> None:
+    """Restore a soft-deleted contract (and optionally descendants).
+
+    Clears deleted flag and deleted_at timestamp.
+    """
+    try:
+        with _conn() as conn:
+            c = conn.cursor()
+            to_unmark = [int(contract_id)]
+            if cascade:
+                stack = [int(contract_id)]
+                while stack:
+                    cur = stack.pop()
+                    c.execute(
+                        "SELECT id FROM contracts WHERE parent_contract_id = ?", (cur,)
+                    )
+                    rows = c.fetchall()
+                    for r in rows:
+                        cid = int(r[0])
+                        to_unmark.append(cid)
+                        stack.append(cid)
+
+            for cid in set(to_unmark):
+                try:
+                    c.execute(
+                        "UPDATE contracts SET deleted = 0, deleted_at = NULL WHERE id = ?",
+                        (cid,),
+                    )
+                except Exception:
+                    logger.exception("Failed to restore contract %s", cid)
+            conn.commit()
+    except Exception:
+        logger.exception("Failed to restore contract %s", contract_id)
+        raise
+
+
+def list_trashed_contracts() -> List[Tuple]:
+    with _conn() as conn:
+        c = conn.cursor()
+        try:
+            c.execute(
+                "SELECT id, employee_id, construction_id, parent_contract_id, start_date, end_date, area, incharge, terms, contract_file_path, deleted, deleted_at FROM contracts WHERE deleted = 1"
+            )
+            return c.fetchall()
+        except Exception:
+            # older DB, no trashed items
+            return []
+
+
+def purge_deleted_older_than(days: int) -> int:
+    """Permanently remove soft-deleted contracts older than `days` days.
+
+    Returns number of contracts purged.
+    """
+    try:
+        from datetime import datetime, timedelta
+
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        purged = 0
+        with _conn() as conn:
+            c = conn.cursor()
+            # find ids to purge
+            try:
+                c.execute(
+                    "SELECT id FROM contracts WHERE deleted = 1 AND deleted_at < ?",
+                    (cutoff,),
+                )
+                rows = c.fetchall()
+            except Exception:
+                return 0
+            ids = [r[0] for r in rows]
+            if not ids:
+                return 0
+            # reuse existing hard-delete helper for each id
+            for cid in ids:
+                delete_contract_and_descendants(cid)
+                purged += 1
+        return purged
+    except Exception:
+        logger.exception("Failed to purge deleted contracts")
+        raise
+
+
+def delete_contract_and_descendants(contract_id: int) -> None:
+    """Recursively delete a contract, its subsets, subset history, and all descendant contracts.
+
+    This operates in a single transaction to ensure consistency.
+    """
+    try:
+        with _conn() as conn:
+            c = conn.cursor()
+            # collect all descendant contract ids (DFS)
+            to_delete = []
+            stack = [int(contract_id)]
+            while stack:
+                cur = stack.pop()
+                to_delete.append(cur)
+                c.execute(
+                    "SELECT id FROM contracts WHERE parent_contract_id = ?", (cur,)
+                )
+                rows = c.fetchall()
+                for r in rows:
+                    stack.append(r[0])
+
+            # delete subsets and their history for each contract id
+            for cid in to_delete:
+                # delete history entries for subsets belonging to this contract
+                c.execute(
+                    "SELECT id FROM contract_subsets WHERE contract_id = ?",
+                    (cid,),
+                )
+                subset_ids = [r[0] for r in c.fetchall()]
+                if subset_ids:
+                    # delete subset status history
+                    c.executemany(
+                        "DELETE FROM subset_status_history WHERE subset_id = ?",
+                        [(sid,) for sid in subset_ids],
+                    )
+                    # delete subsets
+                    c.executemany(
+                        "DELETE FROM contract_subsets WHERE id = ?",
+                        [(sid,) for sid in subset_ids],
+                    )
+            # finally delete contracts themselves
+            c.executemany(
+                "DELETE FROM contracts WHERE id = ?", [(cid,) for cid in to_delete]
+            )
+            conn.commit()
+    except Exception:
+        logger.exception("Failed to delete contract %s and descendants", contract_id)
+        raise
 
 
 def update_subset_status(
@@ -716,6 +1109,38 @@ def get_employee_by_id(emp_id: int) -> Optional[Tuple]:
             (emp_id,),
         )
         return c.fetchone()
+
+
+def search_employees(term: str, limit: Optional[int] = None) -> List[Tuple]:
+    """Search employees by name, job_title, role, or employee_number.
+
+    term: free-text; numeric strings will match employee_number and id.
+    Returns list of rows: id, user_id, employee_number, name, dob, job_title, role, year_start, year_end, profile_pic, contract_type
+    """
+    term = (term or "").strip()
+    with _conn() as conn:
+        c = conn.cursor()
+        params = []
+        search_parts = []
+        if term:
+            like = f"%{term}%"
+            search_parts.append("(name LIKE ? OR job_title LIKE ? OR role LIKE ?)")
+            params.extend([like, like, like])
+            if term.isdigit():
+                search_parts.append("(employee_number = ? OR id = ?)")
+                params.extend([int(term), int(term)])
+        where_sql = ""
+        if search_parts:
+            where_sql = " WHERE (" + " OR ".join(search_parts) + ")"
+        limit_sql = f" LIMIT {int(limit)}" if limit and int(limit) > 0 else ""
+        sql = (
+            "SELECT id, user_id, employee_number, name, dob, job_title, role, year_start, year_end, profile_pic, contract_type FROM employees"
+            + where_sql
+            + " ORDER BY id DESC"
+            + limit_sql
+        )
+        c.execute(sql, tuple(params))
+        return c.fetchall()
 
 
 def update_employee(emp_id: int, **kwargs) -> None:

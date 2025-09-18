@@ -5,10 +5,11 @@ try:
     from hr_management_app.src.ui_import import _collect_db_stats
 except Exception:
     # fallback for developer convenience when running as scripts from src/
+    from ui_import import _collect_db_stats  # type: ignore
+
     from ml.imputer import infer_missing_fields  # type: ignore
     from parsers.file_parser import parse_excel  # type: ignore
     from parsers.normalizer import map_columns, validate_and_clean  # type: ignore
-    from ui_import import _collect_db_stats  # type: ignore
 
 p = "c:/Users/DELL/Documents/GitHub/HR_Management/hr_management_app/src/tests/fixtures/dummy_employees_2000.xlsx"
 raws = parse_excel(p)

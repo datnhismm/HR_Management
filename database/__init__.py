@@ -1,6 +1,7 @@
 """Forwarding package for `database` used by scripts/tools.
 Forwards to the implementation under hr_management_app.src.database.
 """
+
 try:
     from hr_management_app.src.database import database as database
 except Exception:

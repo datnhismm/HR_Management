@@ -1,10 +1,10 @@
 import logging
 import os
-import tkinter as tk
-from datetime import datetime
-from tkinter import messagebox, simpledialog, ttk, filedialog
 import subprocess
 import sys
+import tkinter as tk
+from datetime import datetime
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from types import SimpleNamespace
 from typing import Optional
 
@@ -19,7 +19,7 @@ from hr_management_app.src.database.database import (
     can_grant_role,
     delete_user,
     delete_user_with_admin_check,
-    get_all_contracts,
+    get_all_contracts_filtered,
     get_all_users,
     get_employee_by_id,
     get_month_work_seconds,
@@ -31,6 +31,8 @@ from hr_management_app.src.database.database import (
     update_employee,
     update_user_role,
 )
+from hr_management_app.src.contracts.models import Contract
+from hr_management_app.src.employees.models import Employee
 
 # optional PIL for profile pictures
 logger = logging.getLogger(__name__)
@@ -242,6 +244,16 @@ class EmployeeManagementWindow(tk.Toplevel):
         frm = ttk.Frame(self, padding=8)
         frm.pack(fill="both", expand=True)
 
+        # Employee search controls
+        search_frame = ttk.Frame(frm)
+        search_frame.pack(fill="x", pady=(0, 6))
+        ttk.Label(search_frame, text="Search:").pack(side="left")
+        self.emp_search_var = tk.StringVar()
+        ttk.Entry(search_frame, textvariable=self.emp_search_var).pack(
+            side="left", fill="x", expand=True, padx=(6, 6)
+        )
+        ttk.Button(search_frame, text="Search", command=self.search_employees_handler).pack(side="right")
+
         cols = (
             "id",
             "empnum",
@@ -289,6 +301,31 @@ class EmployeeManagementWindow(tk.Toplevel):
     def load_employees(self):
         for i in self.tree.get_children():
             self.tree.delete(i)
+        # If a search term is provided, use the Employee.search wrapper
+        term = (getattr(self, "emp_search_var", None) and self.emp_search_var.get()) or ""
+        if term:
+            try:
+                rows = Employee.search(term)
+                for r in rows:
+                    self.tree.insert(
+                        "",
+                        "end",
+                        values=(
+                            r.get("id"),
+                            r.get("employee_number"),
+                            r.get("name"),
+                            r.get("job_title"),
+                            r.get("role"),
+                            None,
+                            None,
+                            None,
+                            r.get("user_id"),
+                        ),
+                    )
+                return
+            except Exception:
+                # fallback to full listing on error
+                pass
         with _conn() as conn:
             c = conn.cursor()
             c.execute(
@@ -296,6 +333,9 @@ class EmployeeManagementWindow(tk.Toplevel):
             )
             for row in c.fetchall():
                 self.tree.insert("", "end", values=row)
+
+    def search_employees_handler(self):
+        self.load_employees()
 
     def edit_selected(self):
         sel = self.tree.selection()
@@ -501,6 +541,8 @@ class HRApp(tk.Tk):
         self.profile_image = None
         self.create_widgets()
         self.load_contracts()
+        # sorting state: (column, asc_bool)
+        self._contract_sort = (None, True)
         if self.employee_id:
             self.load_employee_profile()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -572,8 +614,115 @@ class HRApp(tk.Tk):
         # Contracts list: hidden for driver and construction worker
         if self.user_role not in ("driver", "construction_worker"):
             ttk.Label(left_frame, text="Contracts").pack(anchor="w")
-            self.contracts_list = tk.Listbox(left_frame, height=18)
-            self.contracts_list.pack(fill="both", expand=True, pady=(5, 5))
+            # search/filter (live)
+            search_fr = ttk.Frame(left_frame)
+            search_fr.pack(fill="x", pady=(0, 4))
+            self.search_var = tk.StringVar()
+            entry = ttk.Entry(search_fr, textvariable=self.search_var)
+            entry.pack(side="left", fill="x", expand=True)
+            # explicit Search button for non-live activation
+            ttk.Button(search_fr, text="Search", command=self.load_contracts).pack(
+                side="right", padx=(4, 0)
+            )
+            # show trashed contracts toggle
+            self.show_trash_var = tk.BooleanVar(value=False)
+            try:
+                chk = ttk.Checkbutton(
+                    search_fr,
+                    text="Show Trash",
+                    variable=self.show_trash_var,
+                    command=self.load_contracts,
+                )
+            except Exception:
+                # older ttk versions may not accept variable kw; fall back
+                chk = ttk.Checkbutton(
+                    search_fr, text="Show Trash", command=self.load_contracts
+                )
+            chk.pack(side="right", padx=(6, 0))
+            # live filter: trace changes
+            try:
+                self.search_var.trace_add("write", lambda *_: self.load_contracts())
+            except Exception:
+                # older tk versions
+                self.search_var.trace("w", lambda *_: self.load_contracts())
+
+            # hierarchical multi-column tree of contracts
+            cols = ("cid", "area", "incharge", "start", "end", "subsets")
+            self.contracts_tree = ttk.Treeview(
+                left_frame, columns=cols, show="headings"
+            )
+            # define headings (clickable for sorting)
+            self.contracts_tree.heading(
+                "cid", text="ID", command=lambda: self._sort_contracts_by("cid")
+            )
+            self.contracts_tree.heading(
+                "area", text="Area", command=lambda: self._sort_contracts_by("area")
+            )
+            self.contracts_tree.heading(
+                "incharge",
+                text="In-charge",
+                command=lambda: self._sort_contracts_by("incharge"),
+            )
+            self.contracts_tree.heading(
+                "start", text="Start", command=lambda: self._sort_contracts_by("start")
+            )
+            self.contracts_tree.heading(
+                "end", text="End", command=lambda: self._sort_contracts_by("end")
+            )
+            self.contracts_tree.heading(
+                "subsets",
+                text="# Subsets",
+                command=lambda: self._sort_contracts_by("subsets"),
+            )
+            # hide cid column width
+            self.contracts_tree.column("cid", width=60, anchor="center")
+            self.contracts_tree.column("area", width=120, anchor="w")
+            self.contracts_tree.column("incharge", width=120, anchor="w")
+            self.contracts_tree.column("start", width=90, anchor="center")
+            self.contracts_tree.column("end", width=90, anchor="center")
+            self.contracts_tree.column("subsets", width=80, anchor="center")
+            self.contracts_tree.pack(fill="both", expand=True, pady=(5, 5))
+            # allow columns to be resized/stretched
+            self.contracts_tree.column("cid", stretch=False)
+            self.contracts_tree.column("area", stretch=True)
+            self.contracts_tree.column("incharge", stretch=True)
+            self.contracts_tree.column("start", stretch=False)
+            self.contracts_tree.column("end", stretch=False)
+            self.contracts_tree.column("subsets", stretch=False)
+
+            # double-click to view details
+            self.contracts_tree.bind(
+                "<Double-1>", lambda e: self.view_selected_contract()
+            )
+            # right-click context menu
+            self._contract_menu = tk.Menu(self, tearoff=0)
+            self._contract_menu.add_command(
+                label="View Details", command=self.view_selected_contract
+            )
+            self._contract_menu.add_command(
+                label="Add Subcontract", command=self.prefill_add_subcontract
+            )
+            self._contract_menu.add_command(
+                label="Show Subsets", command=self.open_contract_subsets
+            )
+            self._contract_menu.add_command(
+                label="Open Attached File", command=self._open_attached_file
+            )
+            self._contract_menu.add_command(
+                label="Open Containing Folder", command=self._open_containing_folder
+            )
+            self._contract_menu.add_command(
+                label="Download Attached File", command=self._download_attached_file
+            )
+            self._contract_menu.add_command(
+                label="Restore Contract", command=self._restore_contract
+            )
+            self._contract_menu.add_separator()
+            self._contract_menu.add_command(
+                label="Delete Contract", command=self._delete_contract
+            )
+            self.contracts_tree.bind("<Button-3>", self._on_tree_right_click)
+            self.contracts_list = None
         else:
             self.contracts_list = None
         btn_frame = ttk.Frame(left_frame)
@@ -582,7 +731,16 @@ class HRApp(tk.Tk):
             side="left"
         )
         ttk.Button(
+            btn_frame, text="Open Trash Manager", command=self.open_trash_manager
+        ).pack(side="left", padx=6)
+        ttk.Button(btn_frame, text="Undo History", command=self.open_undo_history).pack(
+            side="left", padx=6
+        )
+        ttk.Button(
             btn_frame, text="View Details", command=self.view_selected_contract
+        ).pack(side="left", padx=5)
+        ttk.Button(
+            btn_frame, text="Add Subcontract", command=self.prefill_add_subcontract
         ).pack(side="left", padx=5)
 
         right_frame = ttk.Frame(self, padding=10)
@@ -603,6 +761,11 @@ class HRApp(tk.Tk):
         self.entry_cid = tk.StringVar()
         # now used for construction-specific contracts
         self.entry_construction_id = tk.StringVar()
+        # hierarchical parent contract id (optional)
+        self.entry_parent_contract_id = tk.StringVar()
+        # metadata
+        self.entry_area = tk.StringVar()
+        self.entry_incharge = tk.StringVar()
         self.entry_start = tk.StringVar()
         self.entry_end = tk.StringVar()
         self.entry_terms = tk.StringVar()
@@ -614,15 +777,31 @@ class HRApp(tk.Tk):
         ttk.Entry(add_frame, textvariable=self.entry_construction_id).grid(
             row=1, column=1, sticky="ew"
         )
+        ttk.Label(add_frame, text="Parent Contract ID (optional)").grid(
+            row=1, column=2, sticky="w", padx=(8, 0)
+        )
+        ttk.Entry(add_frame, textvariable=self.entry_parent_contract_id).grid(
+            row=1, column=3, sticky="ew"
+        )
         ttk.Label(add_frame, text="Start (YYYY-MM-DD)").grid(
             row=2, column=0, sticky="w"
         )
         ttk.Entry(add_frame, textvariable=self.entry_start).grid(
             row=2, column=1, sticky="ew"
         )
+        ttk.Label(add_frame, text="Area").grid(row=2, column=2, sticky="w", padx=(8, 0))
+        ttk.Entry(add_frame, textvariable=self.entry_area).grid(
+            row=2, column=3, sticky="ew"
+        )
         ttk.Label(add_frame, text="End (YYYY-MM-DD)").grid(row=3, column=0, sticky="w")
         ttk.Entry(add_frame, textvariable=self.entry_end).grid(
             row=3, column=1, sticky="ew"
+        )
+        ttk.Label(add_frame, text="In-charge").grid(
+            row=3, column=2, sticky="w", padx=(8, 0)
+        )
+        ttk.Entry(add_frame, textvariable=self.entry_incharge).grid(
+            row=3, column=3, sticky="ew"
         )
         ttk.Label(add_frame, text="Terms").grid(row=4, column=0, sticky="w")
         ttk.Entry(add_frame, textvariable=self.entry_terms).grid(
@@ -638,6 +817,7 @@ class HRApp(tk.Tk):
         self.file_lbl = ttk.Label(add_frame, textvariable=self.contract_file_path_var)
         self.file_lbl.grid(row=5, column=1, sticky="w", pady=(6, 0))
         add_frame.columnconfigure(1, weight=1)
+        add_frame.columnconfigure(3, weight=1)
         self.add_contract_btn = ttk.Button(
             add_frame, text="Add Contract", command=self.add_contract
         )
@@ -659,7 +839,12 @@ class HRApp(tk.Tk):
             self.manage_emp_btn.pack_forget()
         # Import from file feature
         try:
-            from ui_import import ImportDialog
+            # Prefer package-qualified import to support running the app as a package/module.
+            try:
+                from hr_management_app.src.ui_import import ImportDialog  # type: ignore
+            except Exception:
+                # Fallback for environments where the package path isn't set.
+                from ui_import import ImportDialog  # type: ignore
 
             self.import_btn = ttk.Button(
                 right_frame,
@@ -671,9 +856,9 @@ class HRApp(tk.Tk):
                 self.import_btn.config(state="disabled")
             if self.user_role in ("driver", "construction_worker"):
                 self.import_btn.pack_forget()
-        except Exception:
+        except Exception as exc:
             # optional feature; if imports aren't available do not crash GUI
-            logger.info("Import feature unavailable (missing dependencies)")
+            logger.info("Import feature unavailable: %s", exc)
 
     def open_manage_users(self):
         if self.user_role != "admin":
@@ -788,44 +973,672 @@ class HRApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
+    def prefill_add_subcontract(self):
+        """Pre-fill the Add Contract form's parent_contract_id with the selected contract in the tree/list."""
+        try:
+            selected_cid = None
+            if hasattr(self, "contracts_tree") and self.contracts_tree is not None:
+                sel = self.contracts_tree.selection()
+                if sel:
+                    selected_cid = self.contracts_tree.item(sel[0], "values")[0]
+            elif self.contracts_list is not None:
+                sel = self.contracts_list.curselection()
+                if sel:
+                    text = self.contracts_list.get(sel[0])
+                    selected_cid = text.split("|")[0].strip()
+            if not selected_cid:
+                messagebox.showinfo(
+                    "Select", "Select a contract first to add a subcontract."
+                )
+                return
+            self.entry_parent_contract_id.set(str(selected_cid))
+            # best-effort focus: try the parent id entry widget if present
+            try:
+                # the parent id entry is the second row, column 3 widget; attempt to find by grid
+                for child in self.winfo_children():
+                    try:
+                        _ = child.nametowidget(child.winfo_name())
+                    except Exception:
+                        _ = child
+                # we avoid fragile lookups; leave focus to the user if not found
+            except Exception:
+                pass
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def _on_tree_right_click(self, event):
+        # Select the item under mouse and popup context menu
+        try:
+            item = self.contracts_tree.identify_row(event.y)
+            if item:
+                # select it
+                self.contracts_tree.selection_set(item)
+                # show menu at pointer
+                try:
+                    self._contract_menu.tk_popup(event.x_root, event.y_root)
+                finally:
+                    self._contract_menu.grab_release()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def _sort_contracts_by(self, column: str):
+        # toggle sort direction if same column
+        cur_col, asc = getattr(self, "_contract_sort", (None, True))
+        if cur_col == column:
+            asc = not asc
+        else:
+            asc = True
+        self._contract_sort = (column, asc)
+        # reload tree with sort applied
+        self.load_contracts()
+
+    def _open_attached_file(self):
+        try:
+            # find selected contract id
+            sel = self.contracts_tree.selection()
+            if not sel:
+                messagebox.showinfo("Select", "Select a contract first.")
+                return
+            cid = int(self.contracts_tree.item(sel[0], "values")[0])
+            from contracts.models import Contract
+
+            contract = Contract.retrieve_contract(cid)
+            if not contract:
+                messagebox.showinfo("Not found", "Contract not found.")
+                return
+            file_path = getattr(contract, "file_path", None)
+            if not file_path:
+                messagebox.showinfo("No file", "No attached file for this contract.")
+                return
+            try:
+                if sys.platform == "win32":
+                    os.startfile(file_path)  # type: ignore[attr-defined]
+                elif sys.platform == "darwin":
+                    subprocess.run(["open", file_path], check=False)
+                else:
+                    subprocess.run(["xdg-open", file_path], check=False)
+            except Exception as e:
+                messagebox.showerror("Open File", f"Failed to open file: {e}")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def _open_containing_folder(self):
+        try:
+            sel = self.contracts_tree.selection()
+            if not sel:
+                messagebox.showinfo("Select", "Select a contract first.")
+                return
+            cid = int(self.contracts_tree.item(sel[0], "values")[0])
+            from contracts.models import Contract
+
+            contract = Contract.retrieve_contract(cid)
+            if not contract:
+                messagebox.showinfo("Not found", "Contract not found.")
+                return
+            file_path = getattr(contract, "file_path", None)
+            if not file_path:
+                messagebox.showinfo("No file", "No attached file for this contract.")
+                return
+            folder = os.path.dirname(file_path)
+            try:
+                if sys.platform == "win32":
+                    subprocess.run(["explorer", folder], check=False)
+                elif sys.platform == "darwin":
+                    subprocess.run(["open", folder], check=False)
+                else:
+                    subprocess.run(["xdg-open", folder], check=False)
+            except Exception as e:
+                messagebox.showerror("Open Folder", f"Failed to open folder: {e}")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def _download_attached_file(self):
+        try:
+            sel = self.contracts_tree.selection()
+            if not sel:
+                messagebox.showinfo("Select", "Select a contract first.")
+                return
+            cid = int(self.contracts_tree.item(sel[0], "values")[0])
+            import shutil
+
+            from contracts.models import Contract
+
+            contract = Contract.retrieve_contract(cid)
+            if not contract:
+                messagebox.showinfo("Not found", "Contract not found.")
+                return
+            file_path = getattr(contract, "file_path", None)
+            if not file_path or not os.path.exists(file_path):
+                messagebox.showinfo("No file", "No attached file for this contract.")
+                return
+            dest = filedialog.asksaveasfilename(
+                title="Save attached file as", initialfile=os.path.basename(file_path)
+            )
+            if not dest:
+                return
+            try:
+                shutil.copy2(file_path, dest)
+                messagebox.showinfo("Saved", f"File saved to {dest}")
+            except Exception as e:
+                messagebox.showerror("Save Failed", str(e))
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def _delete_contract(self):
+        try:
+            sel = self.contracts_tree.selection()
+            if not sel:
+                messagebox.showinfo("Select", "Select a contract first.")
+                return
+            cid = int(self.contracts_tree.item(sel[0], "values")[0])
+            from hr_management_app.src.database.database import (  # use soft-delete instead of hard delete
+                get_child_contracts,
+                get_subsets_count,
+                soft_delete_contract,
+            )
+
+            # check for subsets and child contracts
+            child_contracts = get_child_contracts(cid)
+            subsets_count = get_subsets_count(cid)
+            if child_contracts or subsets_count > 0:
+                details = []
+                if subsets_count:
+                    details.append(f"{subsets_count} subsets")
+                if child_contracts:
+                    details.append(f"{len(child_contracts)} subcontracts")
+                msg = (
+                    f"Contract {cid} has " + ", ".join(details) + ".\n"
+                    "Delete will cascade and remove all descendants and subsets. Continue?"
+                )
+                if not messagebox.askyesno("Cascade Delete Confirmation", msg):
+                    return
+                # perform recursive soft-delete
+                soft_delete_contract(cid, cascade=True)
+            else:
+                if not messagebox.askyesno(
+                    "Confirm", f"Delete contract {cid}? This cannot be undone."
+                ):
+                    return
+                # safe to delete single contract
+                from contracts.models import Contract
+
+                contract = Contract.retrieve_contract(cid)
+                if not contract:
+                    messagebox.showinfo("Not found", "Contract not found.")
+                    return
+                # soft-delete single contract (no cascade)
+                try:
+                    soft_delete_contract(cid, cascade=False)
+                except Exception:
+                    # fallback: hard delete via model
+                    contract.delete()
+            messagebox.showinfo("Deleted", "Contract deleted.")
+            self.load_contracts()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+        else:
+            # show undo toast for quick restore
+            try:
+                self._show_undo_toast(cid)
+            except Exception:
+                pass
+
+    def _restore_contract(self):
+        try:
+            sel = self.contracts_tree.selection()
+            if not sel:
+                messagebox.showinfo("Select", "Select a contract first.")
+                return
+            cid = int(self.contracts_tree.item(sel[0], "values")[0])
+            from hr_management_app.src.database.database import restore_contract
+
+            restore_contract(cid, cascade=True)
+            messagebox.showinfo("Restored", "Contract restored.")
+            self.load_contracts()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
     def load_contracts(self):
         # If contracts_list is not present for this role, skip
-        if self.contracts_list is None:
-            return
         try:
-            self.contracts_list.delete(0, tk.END)
+            # clear existing tree
+            if hasattr(self, "contracts_tree") and self.contracts_tree is not None:
+                for ch in self.contracts_tree.get_children():
+                    self.contracts_tree.delete(ch)
+            # include deleted rows only when requested via the Show Trash checkbox
+            try:
+                rows = get_all_contracts_filtered(
+                    include_deleted=(
+                        self.show_trash_var.get()
+                        if hasattr(self, "show_trash_var")
+                        else False
+                    )
+                )
+            except Exception:
+                # fallback to older helper
+                from hr_management_app.src.database.database import (
+                    get_all_contracts as _gac,
+                )
+
+                rows = _gac()
+            # build a map of id -> children to assemble a simple tree and a row lookup
+            nodes = {}
+            children_map = {}
+            rows_by_id = {}
+            for row in rows:
+                # Expected new shape: id, employee_id, construction_id, parent_contract_id, start_date, end_date, area, incharge, terms, file
+                if len(row) >= 10:
+                    cid = row[0]
+                    parent_id = row[3]
+                    start = row[4]
+                    end = row[5]
+                    area = row[6]
+                    incharge = row[7]
+                    terms = row[8]
+                else:
+                    cid = row[0] if len(row) > 0 else None
+                    parent_id = None
+                    start = row[3] if len(row) > 3 else None
+                    end = row[4] if len(row) > 4 else None
+                    area = None
+                    incharge = None
+                    terms = None
+                nodes[cid] = f"{cid} | Area:{area or 'N/A'} | {start} → {end}"
+                rows_by_id[cid] = {
+                    "area": area,
+                    "incharge": incharge,
+                    "start": start,
+                    "end": end,
+                    "terms": terms,
+                    "parent_id": parent_id,
+                }
+                children_map.setdefault(parent_id, []).append(cid)
+
+            # prepare search/filter
+            search = (
+                self.search_var.get().strip()
+                if hasattr(self, "search_var")
+                else ""
+            )
+            # if a search term is provided, prefer DB-backed search to get matching ids
+            match_ids = set()
+            if search:
+                try:
+                    # Contract.search returns Contract objects
+                    matches = Contract.search(
+                        search, include_deleted=(
+                            self.show_trash_var.get()
+                            if hasattr(self, "show_trash_var")
+                            else False
+                        )
+                    )
+                    match_ids = {int(m.id) for m in matches if getattr(m, "id", None) is not None}
+                except Exception:
+                    match_ids = set()
+
+            # determine which nodes to include: include node if it or a descendant matches search
+            include_cache = {}
+
+            def node_matches(cid_val: int) -> bool:
+                # If no search, all nodes match by default
+                if not search:
+                    return True
+                # DB matched ids take precedence
+                if cid_val in match_ids:
+                    return True
+                info = rows_by_id.get(cid_val, {})
+                for f in (info.get("area"), info.get("incharge"), info.get("terms")):
+                    if f and search in str(f).lower():
+                        return True
+                return False
+
+            def should_include(cid_val: int) -> bool:
+                if cid_val in include_cache:
+                    return include_cache[cid_val]
+                # own match
+                if node_matches(cid_val):
+                    include_cache[cid_val] = True
+                    return True
+                # descendant match
+                for ch in children_map.get(cid_val, []):
+                    if should_include(ch):
+                        include_cache[cid_val] = True
+                        return True
+                include_cache[cid_val] = False
+                return False
+
+            # For multi-column tree, collect rows then insert with hierarchy; support sorting
+            def insert_subtree(parent, parent_node):
+                rows_to_insert = []
+                for child_id in children_map.get(parent, []):
+                    if not should_include(child_id):
+                        continue
+                    info = rows_by_id.get(child_id, {})
+                    area = info.get("area")
+                    incharge = info.get("incharge")
+                    start = info.get("start")
+                    end = info.get("end")
+                    # subset count
+                    subs_count = 0
+                    try:
+                        from hr_management_app.src.database.database import (
+                            get_subsets_for_contract,
+                        )
+
+                        subs = get_subsets_for_contract(child_id)
+                        subs_count = len(subs)
+                    except Exception:
+                        subs_count = 0
+                    rows_to_insert.append(
+                        (
+                            child_id,
+                            area or "",
+                            incharge or "",
+                            start or "",
+                            end or "",
+                            subs_count,
+                        )
+                    )
+
+                # apply sorting if requested
+                sort_col, asc = getattr(self, "_contract_sort", (None, True))
+                if sort_col:
+                    col_index = {
+                        "cid": 0,
+                        "area": 1,
+                        "incharge": 2,
+                        "start": 3,
+                        "end": 4,
+                        "subsets": 5,
+                    }.get(sort_col, 0)
+                    try:
+                        rows_to_insert.sort(
+                            key=lambda r: (
+                                r[col_index] if r[col_index] is not None else ""
+                            )
+                        )
+                        if not asc:
+                            rows_to_insert.reverse()
+                    except Exception:
+                        pass
+
+                for vals in rows_to_insert:
+                    node_id = self.contracts_tree.insert(
+                        parent_node, "end", values=vals
+                    )
+                    insert_subtree(vals[0], node_id)
+
+            # insert roots (parent is None)
+            insert_subtree(None, "")
+        except Exception as e:
+            try:
+                messagebox.showerror(
+                    "Error", f"Failed to load contracts:\n{e}", parent=self
+                )
+            except Exception:
+                messagebox.showerror("Error", f"Failed to load contracts:\n{e}")
+
+    # ---- Trash manager and undo toast ----
+    def open_trash_manager(self):
+        win = tk.Toplevel(self)
+        win.title("Trash Manager")
+        win.geometry("700x420")
+        frm = ttk.Frame(win, padding=8)
+        frm.pack(fill="both", expand=True)
+
+        cols = ("id", "area", "incharge", "deleted_at")
+        tree = ttk.Treeview(frm, columns=cols, show="headings")
+        for c in cols:
+            tree.heading(c, text=c.title())
+            tree.column(c, anchor="center")
+        tree.pack(fill="both", expand=True)
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(6, 0))
+        ttk.Button(btns, text="Refresh", command=lambda: self._load_trash(tree)).pack(
+            side="left"
+        )
+        ttk.Button(
+            btns,
+            text="Restore Selected",
+            command=lambda: self._restore_selected_from_trash(tree),
+        ).pack(side="left", padx=4)
+        ttk.Button(
+            btns,
+            text="Purge Selected",
+            command=lambda: self._purge_selected_from_trash(tree),
+        ).pack(side="left", padx=4)
+        ttk.Button(btns, text="Close", command=win.destroy).pack(side="right")
+
+        self._load_trash(tree)
+
+    def _load_trash(self, tree):
+        for i in tree.get_children():
+            tree.delete(i)
+        try:
+            from hr_management_app.src.database.database import list_trashed_contracts
+
+            rows = list_trashed_contracts()
+            for r in rows:
+                # r shape: id, employee_id, construction_id, parent_id, start, end, area, incharge, terms, file, deleted, deleted_at
+                tree.insert(
+                    "", "end", values=(r[0], r[6] or "", r[7] or "", r[11] or "")
+                )
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load trash: {e}")
+
+    def _restore_selected_from_trash(self, tree):
+        sel = tree.selection()
+        if not sel:
+            messagebox.showinfo("Select", "Select item(s) to restore")
+            return
+        ids = [int(tree.item(s)["values"][0]) for s in sel]
+        try:
+            from hr_management_app.src.database.database import restore_contract
+
+            for cid in ids:
+                restore_contract(cid, cascade=True)
+            messagebox.showinfo("Restored", "Selected contracts restored")
+            self.load_contracts()
+            self._load_trash(tree)
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def _purge_selected_from_trash(self, tree):
+        sel = tree.selection()
+        if not sel:
+            messagebox.showinfo("Select", "Select item(s) to purge")
+            return
+        if not messagebox.askyesno("Confirm", "Permanently delete selected contracts?"):
+            return
+        ids = [int(tree.item(s)["values"][0]) for s in sel]
+        try:
+            from hr_management_app.src.database.database import (
+                delete_contract_and_descendants,
+            )
+
+            for cid in ids:
+                delete_contract_and_descendants(cid)
+            messagebox.showinfo("Purged", "Selected contracts permanently deleted")
+            self.load_contracts()
+            self._load_trash(tree)
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def _show_undo_toast(self, contract_id: int, timeout: int = 6):
+        # polished transient Toplevel with a progress bar and Undo button
+        try:
+            toast = tk.Toplevel(self)
+            toast.overrideredirect(True)
+            toast.attributes("topmost", True)
+            # frame with relief and padding for a modern look
+            frm = ttk.Frame(toast, padding=6, relief="raised", borderwidth=1)
+            frm.pack(fill="both", expand=True)
+
+            lbl = ttk.Label(
+                frm, text=f"Contract {contract_id} moved to Trash", anchor="w"
+            )
+            lbl.pack(side="top", fill="x")
+
+            inner = ttk.Frame(frm)
+            inner.pack(side="top", fill="x", pady=(6, 0))
+            undo_btn = ttk.Button(
+                inner,
+                text="Undo",
+                command=lambda: [self._undo_restore(contract_id), toast.destroy()],
+            )
+            undo_btn.pack(side="left")
+            # small "View History" link
+            hist_btn = ttk.Button(
+                inner,
+                text="View History",
+                command=lambda: [self.open_undo_history(), toast.destroy()],
+            )
+            hist_btn.pack(side="left", padx=(6, 0))
+
+            # progress bar showing time left
+            pb = ttk.Progressbar(frm, mode="determinate", maximum=timeout * 10)
+            pb.pack(side="top", fill="x", pady=(6, 0))
+
+            # position near main window bottom-right
+            self.update_idletasks()
+            width = 340
+            height = 84
+            x = max(self.winfo_rootx() + self.winfo_width() - width - 12, 12)
+            y = max(self.winfo_rooty() + self.winfo_height() - height - 12, 12)
+            toast.geometry(f"{width}x{height}+{x}+{y}")
+
+            # add to undo history stack
+            if not hasattr(self, "_undo_history"):
+                self._undo_history = []  # list of (id, ts)
+            import time
+
+            self._undo_history.insert(0, (contract_id, int(time.time())))
+            # keep limited history
+            if len(self._undo_history) > 10:
+                self._undo_history = self._undo_history[:10]
+
+            # animate progress bar in 100ms steps
+            def tick(remaining: int = timeout * 10):
+                try:
+                    if remaining <= 0:
+                        toast.destroy()
+                        return
+                    pb["value"] = (timeout * 10) - remaining
+                    toast.after(100, lambda: tick(remaining - 1))
+                except Exception:
+                    try:
+                        toast.destroy()
+                    except Exception:
+                        pass
+
+            tick()
         except Exception:
             pass
+
+    def _undo_restore(self, cid: int):
         try:
-            rows = get_all_contracts()
-            for row in rows:
-                # support multiple row shapes; prefer construction_id when present
-                if len(row) >= 7:
-                    cid, eid, cons_id, start, end, terms, fpath = row
-                elif len(row) == 6:
-                    cid, eid, start, end, terms, fpath = row
-                    cons_id = None
-                else:
-                    cid, eid, start, end, terms = row
-                    cons_id = None
-                    fpath = None
-                label = f"{cid} | Cons:{cons_id or 'N/A'} | Emp:{eid or 'N/A'} | {start} → {end}"
-                self.contracts_list.insert(tk.END, label)
+            from hr_management_app.src.database.database import restore_contract
+
+            restore_contract(cid, cascade=False)
+            self.load_contracts()
+        except Exception:
+            pass
+
+    def open_undo_history(self):
+        # shows a small window with recent deletions and restore buttons
+        win = tk.Toplevel(self)
+        win.title("Undo History")
+        win.geometry("420x320")
+        frm = ttk.Frame(win, padding=8)
+        frm.pack(fill="both", expand=True)
+
+        cols = ("id", "deleted_at")
+        tree = ttk.Treeview(frm, columns=cols, show="headings")
+        for c in cols:
+            tree.heading(c, text=c.title())
+            tree.column(c, anchor="center")
+        tree.pack(fill="both", expand=True)
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(6, 0))
+        ttk.Button(
+            btns, text="Refresh", command=lambda: self._populate_undo_history(tree)
+        ).pack(side="left")
+        ttk.Button(
+            btns,
+            text="Restore Selected",
+            command=lambda: self._restore_from_history(tree),
+        ).pack(side="left", padx=4)
+        ttk.Button(btns, text="Close", command=win.destroy).pack(side="right")
+
+        self._populate_undo_history(tree)
+
+    def _populate_undo_history(self, tree):
+        for i in tree.get_children():
+            tree.delete(i)
+        entries = getattr(self, "_undo_history", [])
+        # try to enrich with deleted_at from DB if available
+        try:
+            from hr_management_app.src.database.database import get_contract_by_id
+
+            for cid, ts in entries:
+                row = get_contract_by_id(cid, include_deleted=True)
+                deleted_at = None
+                if row:
+                    deleted_at = (
+                        row.get("deleted_at")
+                        if isinstance(row, dict)
+                        else row[11] if len(row) > 11 else None
+                    )
+                tree.insert("", "end", values=(cid, deleted_at or ts))
+        except Exception:
+            for cid, ts in entries:
+                tree.insert("", "end", values=(cid, ts))
+
+    def _restore_from_history(self, tree):
+        sel = tree.selection()
+        if not sel:
+            messagebox.showinfo("Select", "Select item(s) to restore")
+            return
+        ids = [int(tree.item(s)["values"][0]) for s in sel]
+        try:
+            from hr_management_app.src.database.database import restore_contract
+
+            for cid in ids:
+                restore_contract(cid, cascade=False)
+            messagebox.showinfo("Restored", "Selected contracts restored")
+            self.load_contracts()
+            # remove restored from history
+            self._undo_history = [
+                e for e in getattr(self, "_undo_history", []) if e[0] not in ids
+            ]
+            self._populate_undo_history(tree)
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to load contracts:\n{e}")
+            messagebox.showerror("Error", str(e))
 
     def view_selected_contract(self):
-        if self.contracts_list is None:
-            messagebox.showinfo(
-                "Unavailable", "Contracts are not available for your role."
-            )
-            return
-        sel = self.contracts_list.curselection()
-        if not sel:
-            messagebox.showinfo("Info", "Select a contract first.")
-            return
-        text = self.contracts_list.get(sel[0])
-        cid = text.split("|")[0].strip()
+        # support both tree and list selection
+        cid = None
+        if hasattr(self, "contracts_tree") and self.contracts_tree is not None:
+            sel = self.contracts_tree.selection()
+            if not sel:
+                messagebox.showinfo("Info", "Select a contract first.")
+                return
+            item = sel[0]
+            cid = self.contracts_tree.item(item, "values")[0]
+        else:
+            if self.contracts_list is None:
+                messagebox.showinfo(
+                    "Unavailable", "Contracts are not available for your role."
+                )
+                return
+            sel = self.contracts_list.curselection()
+            if not sel:
+                messagebox.showinfo("Info", "Select a contract first.")
+                return
+            text = self.contracts_list.get(sel[0])
+            cid = text.split("|")[0].strip()
         try:
             from contracts.models import Contract
 
@@ -846,6 +1659,7 @@ class HRApp(tk.Tk):
                 # open attached file if present
                 file_path = getattr(contract, "file_path", None)
                 if file_path:
+
                     def _open():
                         try:
                             if sys.platform == "win32":
@@ -855,7 +1669,9 @@ class HRApp(tk.Tk):
                             else:
                                 subprocess.run(["xdg-open", file_path], check=False)
                         except Exception as e:
-                            messagebox.showerror("Open File", f"Failed to open file: {e}")
+                            messagebox.showerror(
+                                "Open File", f"Failed to open file: {e}"
+                            )
 
                     ttk.Button(btn_fr, text="Open Attached File", command=_open).pack(
                         side="left", padx=4
@@ -880,31 +1696,41 @@ class HRApp(tk.Tk):
             try:
                 from ui_validators import validate_contract_fields
 
-                cid, eid, start_iso, end_iso = validate_contract_fields(
-                    cid_text, eid_text, start, end
+                cid, eid, start_iso, end_iso, parent_id = validate_contract_fields(
+                    cid_text, eid_text, start, end, self.entry_parent_contract_id.get()
                 )
             except Exception as ve:
                 messagebox.showerror("Validation", str(ve), parent=self)
                 return
 
-            # note: construction_id is independent of employees; skip employee validation
-
-            # if a file was attached, store it and set file_path
+            # note: construction_id is independent of employees; allow empty employee id for construction-only contracts
+            # if a file was attached, store it and set file_path; surface errors to the user
             file_path = self.contract_file_path_var.get() or None
             stored_path = None
             if file_path:
                 try:
-                    from contracts.models import store_contract_file
+                    from hr_management_app.src.contracts.models import (
+                        store_contract_file,
+                    )
 
                     stored_path = store_contract_file(file_path, construction_id=eid)
-                except Exception:
-                    # continue without stored path
-                    stored_path = None
+                except Exception as exc:
+                    # Surface storage error to user and abort the add
+                    logger.exception("Failed to store contract file: %s", exc)
+                    messagebox.showerror(
+                        "File error",
+                        f"Failed to store attached file: {exc}",
+                        parent=self,
+                    )
+                    return
 
             c = SimpleNamespace(
                 id=cid,
                 employee_id=None,
                 construction_id=eid,
+                parent_contract_id=parent_id,
+                area=(self.entry_area.get().strip() or None),
+                incharge=(self.entry_incharge.get().strip() or None),
                 start_date=start_iso,
                 end_date=end_iso,
                 terms=terms,
@@ -920,21 +1746,32 @@ class HRApp(tk.Tk):
     def clear_add_fields(self):
         self.entry_cid.set("")
         self.entry_construction_id.set("")
+        self.entry_parent_contract_id.set("")
+        self.entry_area.set("")
+        self.entry_incharge.set("")
         self.entry_start.set("")
         self.entry_end.set("")
         self.entry_terms.set("")
         self.contract_file_path_var.set("")
 
-
     def pick_contract_file(self, parent=None):
         """Open a file picker for pdf/docx and set the selected path into the UI var."""
         try:
-            filetypes = [("PDF files", "*.pdf"), ("Word documents", "*.docx"), ("All files", "*")]
-            path = filedialog.askopenfilename(title="Select contract file", filetypes=filetypes, parent=parent)
+            filetypes = [
+                ("PDF files", "*.pdf"),
+                ("Word documents", "*.docx"),
+                ("All files", "*"),
+            ]
+            path = filedialog.askopenfilename(
+                title="Select contract file", filetypes=filetypes, parent=parent
+            )
             if path:
                 self.contract_file_path_var.set(path)
         except Exception as e:
-            messagebox.showerror("File select", str(e), parent=parent)
+            try:
+                messagebox.showerror("File select", str(e), parent=parent)
+            except Exception:
+                messagebox.showerror("File select", str(e))
 
     def toggle_check(self):
         if not self.employee_id:
