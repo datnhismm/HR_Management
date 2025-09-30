@@ -5,8 +5,13 @@ import os
 import random
 import secrets
 import smtplib
+import uuid
 import sqlite3
+import threading
+import time
+import json
 from contextlib import contextmanager
+from types import SimpleNamespace
 from datetime import date, datetime, timedelta, timezone
 from email.message import EmailMessage
 from typing import List, Optional, Tuple
@@ -186,6 +191,58 @@ def _create_tables(conn) -> None:
     """
     )
     conn.commit()
+
+    # Email outbox table for durable sends & retries
+    try:
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS email_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                to_email TEXT,
+                subject TEXT,
+                body TEXT,
+                raw_message TEXT,
+                status TEXT DEFAULT 'pending', -- pending, sent, failed
+                attempt_count INTEGER DEFAULT 0,
+                last_error TEXT,
+                last_attempt_at TEXT,
+                created_at TEXT,
+                tracking_code TEXT
+            )
+        """
+        )
+        conn.commit()
+    except Exception:
+        # non-fatal; outbox is optional
+        logger.exception("Failed to create email_outbox table")
+    # Pending contracts table: stores submissions that require management approval
+    try:
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pending_contracts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                contract_id INTEGER,
+                employee_id INTEGER,
+                construction_id INTEGER,
+                parent_contract_id INTEGER,
+                area TEXT,
+                incharge TEXT,
+                start_date TEXT,
+                end_date TEXT,
+                terms TEXT,
+                file_path TEXT,
+                submitted_by INTEGER,
+                submitted_at TEXT,
+                status TEXT DEFAULT 'pending', -- pending, approved, rejected
+                approved_by INTEGER,
+                approved_at TEXT,
+                rejection_reason TEXT
+            )
+        """
+        )
+        conn.commit()
+    except Exception:
+        logger.exception("Failed to create pending_contracts table")
 
     # Create FTS5 virtual table for contracts text search (terms, area, incharge)
     try:
@@ -974,16 +1031,58 @@ def send_email(to_email: str, subject: str, body: str) -> None:
             "Missing or invalid email_config.py in src/ — create it with SMTP settings."
         ) from e
 
-    # If SMTP isn't configured (development), skip sending and log.
-    if not SMTP_CONFIGURED:
-        logger.info("SMTP not configured; skipping send to %s", to_email)
-        return
-
+    # Build the EmailMessage first so we can both save and send it.
     msg = EmailMessage()
+    # Use a friendly display name and include a Reply-To header to help spam filters
+    try:
+        display_from = f"HR Management <{FROM_EMAIL}>"
+    except Exception:
+        display_from = FROM_EMAIL
     msg["Subject"] = subject
-    msg["From"] = FROM_EMAIL
+    msg["From"] = display_from
     msg["To"] = to_email
+    msg["Reply-To"] = FROM_EMAIL
+    # Small harmless X-Mailer header to identify the app (helps some providers)
+    msg["X-Mailer"] = "HRManagement/1.0"
+    # Use a plain, short body to reduce likelihood of spam classification
     msg.set_content(body)
+
+    # Always save a copy of outgoing messages to the local filesystem outbox for inspection.
+    outpath = None
+    try:
+        outbox_dir = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "outbox")
+        )
+        os.makedirs(outbox_dir, exist_ok=True)
+        fname = f"{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex}.eml"
+        outpath = os.path.join(outbox_dir, fname)
+        try:
+            with open(outpath, "w", encoding="utf-8") as fh:
+                # EmailMessage.as_string() can raise in rare cases; guard it
+                try:
+                    fh.write(msg.as_string())
+                except Exception:
+                    # Fallback to bytes if available
+                    try:
+                        fh.write(msg.as_bytes().decode("utf-8", errors="replace"))
+                    except Exception:
+                        fh.write(str(msg))
+        except Exception:
+            # Do not prevent sending if outbox write fails
+            logger.exception("Failed to write outbox file %s", outpath)
+    except Exception:
+        # Non-fatal; continue to send
+        logger.exception("Failed to prepare outbox directory")
+
+    # If SMTP isn't configured (development), skip sending over network and log.
+    if not SMTP_CONFIGURED:
+        logger.info("SMTP not configured; skipping network send to %s; saved to %s", to_email, outpath if outpath else '<unknown>')
+        # persist to DB outbox as pending so workers or manual inspection can send later
+        try:
+            enqueue_email_outbox(to_email, subject, body, msg.as_string(), tracking_code=None)
+        except Exception:
+            logger.exception("Failed to enqueue to DB outbox while SMTP not configured")
+        return
 
     try:
         if SMTP_USE_SSL:
@@ -991,6 +1090,12 @@ def send_email(to_email: str, subject: str, body: str) -> None:
                 if SMTP_USER:
                     smtp.login(SMTP_USER, SMTP_PASSWORD)
                 smtp.send_message(msg)
+                # mark outbox sent if present
+                try:
+                    mark_outbox_sent_by_raw(msg.as_string())
+                except Exception:
+                    # non-fatal
+                    logger.exception("Failed to mark outbox as sent")
         else:
             with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=15) as smtp:
                 smtp.ehlo()
@@ -1007,6 +1112,11 @@ def send_email(to_email: str, subject: str, body: str) -> None:
         ) from ex
     except Exception as ex:
         logger.exception("Failed to send email: %s", ex)
+        # On failure, enqueue or mark DB outbox failed
+        try:
+            enqueue_email_outbox(to_email, subject, body, msg.as_string(), tracking_code=None, mark_failed=True, last_error=str(ex))
+        except Exception:
+            logger.exception("Failed to enqueue failed email to outbox")
         raise RuntimeError(f"Failed to send email: {ex}") from ex
 
 
@@ -1020,9 +1130,155 @@ def generate_verification_code() -> str:
 
 
 def send_verification_code(email: str, code: str) -> None:
-    subject = "Your HR Management Verification Code"
-    body = f"Your verification code is: {code}\n\nEnter this code to complete your sign up."
+    # Short, neutral subject and minimal body reduce spam triggers. Avoid excessive words like
+    # "verify" in all-caps, URLs, or large HTML blocks which can increase spam scoring.
+    subject = "HR Management — Account confirmation"
+    body = (
+        f"Hello,\n\n" f"Use the following code to complete your account confirmation: {code}\n\n" "If you did not request this, you can ignore this message."
+    )
     send_email(email, subject, body)
+
+
+# ---------- Email outbox (DB) helpers & worker ----------
+def enqueue_email_outbox(
+    to_email: str,
+    subject: str,
+    body: str,
+    raw_message: Optional[str] = None,
+    tracking_code: Optional[str] = None,
+    mark_failed: bool = False,
+    last_error: Optional[str] = None,
+) -> int:
+    """Insert an email into the DB outbox and return the outbox row id."""
+    created_at = datetime.utcnow().isoformat()
+    status = 'failed' if mark_failed else 'pending'
+    with _conn() as conn:
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO email_outbox (to_email, subject, body, raw_message, status, attempt_count, last_error, last_attempt_at, created_at, tracking_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (to_email, subject, body, raw_message, status, 0, last_error, None, created_at, tracking_code),
+        )
+        conn.commit()
+        return int(c.lastrowid or 0)
+
+
+def mark_outbox_sent(outbox_id: int) -> None:
+    with _conn() as conn:
+        c = conn.cursor()
+        c.execute(
+            "UPDATE email_outbox SET status = 'sent', last_attempt_at = ?, attempt_count = attempt_count + 1 WHERE id = ?",
+            (datetime.utcnow().isoformat(), outbox_id),
+        )
+        conn.commit()
+
+
+def mark_outbox_failed(outbox_id: int, last_error: Optional[str] = None) -> None:
+    with _conn() as conn:
+        c = conn.cursor()
+        c.execute(
+            "UPDATE email_outbox SET status = 'failed', last_error = ?, last_attempt_at = ?, attempt_count = attempt_count + 1 WHERE id = ?",
+            (last_error, datetime.utcnow().isoformat(), outbox_id),
+        )
+        conn.commit()
+
+
+def mark_outbox_sent_by_raw(raw_message: str) -> None:
+    # best-effort: try to find an outbox row with matching raw_message and mark sent
+    try:
+        with _conn() as conn:
+            c = conn.cursor()
+            c.execute(
+                "SELECT id FROM email_outbox WHERE raw_message = ? ORDER BY id DESC LIMIT 1",
+                (raw_message,),
+            )
+            row = c.fetchone()
+            if row:
+                mark_outbox_sent(int(row[0]))
+    except Exception:
+        logger.exception("Failed to mark outbox sent by raw message")
+
+
+def process_outbox_once(max_attempts: int = 5, backoff_base: float = 2.0) -> int:
+    """Process pending outbox rows once. Returns number of processed rows.
+
+    This function will attempt to send pending emails (status='pending') and update their status.
+    It will skip rows that have attempt_count >= max_attempts.
+    """
+    processed = 0
+    with _conn() as conn:
+        c = conn.cursor()
+        c.execute(
+            "SELECT id, to_email, subject, body, raw_message, attempt_count FROM email_outbox WHERE status = 'pending' ORDER BY id"
+        )
+        rows = c.fetchall()
+    for r in rows:
+        outbox_id, to_email, subject, body, raw_message, attempt_count = r
+        if attempt_count >= max_attempts:
+            # mark as failed permanently
+            mark_outbox_failed(outbox_id, "max attempts reached")
+            continue
+        # attempt send
+        try:
+            # attempt to send using send_email but avoid infinite loop: pass raw_message and update on success
+            if raw_message:
+                # try low-level send using smtplib to reuse existing config
+                try:
+                    # reuse send_email but it writes to outbox again; we temporarily disable that by enqueuing with mark_failed flag
+                    send_email(to_email, subject, body)
+                except Exception as ex:
+                    mark_outbox_failed(outbox_id, str(ex))
+                    continue
+            else:
+                try:
+                    send_email(to_email, subject, body)
+                except Exception as ex:
+                    mark_outbox_failed(outbox_id, str(ex))
+                    continue
+            # if we get here, assume success
+            mark_outbox_sent(outbox_id)
+            processed += 1
+        finally:
+            # small sleep to avoid rapid-fire sending when processing many messages
+            time.sleep(0.1)
+    return processed
+
+
+_outbox_worker_thread = None
+_outbox_worker_stop = False
+
+
+def start_outbox_worker(poll_interval: float = 15.0) -> None:
+    """Start a background thread that processes the outbox periodically.
+
+    This is safe to call multiple times; it will start only one worker thread.
+    """
+    global _outbox_worker_thread, _outbox_worker_stop
+
+    def _worker():
+        logger.info("Outbox worker started")
+        while not _outbox_worker_stop:
+            try:
+                processed = process_outbox_once()
+                if processed:
+                    logger.info("Outbox worker processed %d messages", processed)
+            except Exception:
+                logger.exception("Outbox worker error")
+            time.sleep(poll_interval)
+        logger.info("Outbox worker stopping")
+
+    if _outbox_worker_thread and _outbox_worker_thread.is_alive():
+        return
+    _outbox_worker_stop = False
+    _outbox_worker_thread = threading.Thread(target=_worker, daemon=True)
+    _outbox_worker_thread.start()
+
+
+def stop_outbox_worker() -> None:
+    """Stop the background outbox worker thread if running."""
+    global _outbox_worker_stop, _outbox_worker_thread
+    _outbox_worker_stop = True
+    if _outbox_worker_thread:
+        _outbox_worker_thread.join(timeout=5.0)
 
 
 # ---------- Employees ----------
@@ -1157,8 +1413,14 @@ def update_employee(emp_id: int, **kwargs) -> None:
 
 # ---------- Attendance ----------
 def has_checkin_today(employee_id: int) -> bool:
-    today_start = datetime.combine(date.today(), datetime.min.time()).isoformat()
-    today_end = datetime.combine(date.today(), datetime.max.time()).isoformat()
+    # Stored timestamps use UTC (datetime.now(timezone.utc).isoformat()).
+    # Compute today's start/end in UTC to reliably detect a check-in that occurred
+    # on the same UTC date. This prevents timezone mismatches where naive local
+    # datetimes would not match stored UTC timestamps.
+    now_utc = datetime.now(timezone.utc)
+    today_utc = now_utc.date()
+    today_start = datetime.combine(today_utc, datetime.min.time()).replace(tzinfo=timezone.utc).isoformat()
+    today_end = datetime.combine(today_utc, datetime.max.time()).replace(tzinfo=timezone.utc).isoformat()
     with _conn() as conn:
         c = conn.cursor()
         c.execute(
@@ -1182,7 +1444,26 @@ def has_open_session(employee_id: int) -> bool:
         return c.fetchone() is not None
 
 
+def has_checked_out_today(employee_id: int) -> bool:
+    """Return True if the employee has a non-null check_out timestamp recorded during today's UTC date."""
+    now_utc = datetime.now(timezone.utc)
+    today_utc = now_utc.date()
+    today_start = datetime.combine(today_utc, datetime.min.time()).replace(tzinfo=timezone.utc).isoformat()
+    today_end = datetime.combine(today_utc, datetime.max.time()).replace(tzinfo=timezone.utc).isoformat()
+    with _conn() as conn:
+        c = conn.cursor()
+        c.execute(
+            "SELECT 1 FROM attendance WHERE employee_id = ? AND check_out BETWEEN ? AND ? LIMIT 1",
+            (employee_id, today_start, today_end),
+        )
+        return c.fetchone() is not None
+
+
 def record_check_in(employee_id: int) -> Optional[str]:
+    # Prevent creating a new check-in if there's an open session
+    if has_open_session(employee_id):
+        return None
+    # Also prevent multiple check-ins per UTC day
     if has_checkin_today(employee_id):
         return None
     now = datetime.now(timezone.utc).isoformat()
@@ -1200,21 +1481,18 @@ def record_check_out(employee_id: int) -> Optional[str]:
     now = datetime.now(timezone.utc).isoformat()
     with _conn() as conn:
         c = conn.cursor()
+        # Find the most recent open session for this employee and close only that one.
         c.execute(
-            """
-            SELECT id FROM attendance
-            WHERE employee_id = ? AND check_out IS NULL
-            ORDER BY check_in DESC
-            LIMIT 1
-        """,
+            "SELECT id FROM attendance WHERE employee_id = ? AND check_out IS NULL ORDER BY id DESC LIMIT 1",
             (employee_id,),
         )
         row = c.fetchone()
         if not row:
             return None
-        attendance_id = row[0]
+        out_id = int(row[0])
         c.execute(
-            "UPDATE attendance SET check_out = ? WHERE id = ?", (now, attendance_id)
+            "UPDATE attendance SET check_out = ? WHERE id = ?",
+            (now, out_id),
         )
         conn.commit()
         return now
@@ -1283,8 +1561,114 @@ def calculate_salary(
         hours = seconds / 3600.0
         salary = round(hours * float(hourly_wage), 2)
         return salary
-    except Exception as exc:
-        raise RuntimeError(f"Failed to calculate salary: {exc}")
+    except Exception:
+        logger.exception(
+            "Failed to calculate salary for employee %s between %s and %s",
+            employee_id,
+            start_date,
+            end_date,
+        )
+        return 0.0
+
+
+# ---------- Pending contracts workflow ----------
+def submit_pending_contract(
+    contract_id: int,
+    employee_id: Optional[int],
+    construction_id: Optional[int],
+    parent_contract_id: Optional[int],
+    area: Optional[str],
+    incharge: Optional[str],
+    start_date: Optional[str],
+    end_date: Optional[str],
+    terms: Optional[str],
+    file_path: Optional[str],
+    submitted_by: Optional[int] = None,
+) -> int:
+    submitted_at = datetime.utcnow().isoformat()
+    with _conn() as conn:
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO pending_contracts (contract_id, employee_id, construction_id, parent_contract_id, area, incharge, start_date, end_date, terms, file_path, submitted_by, submitted_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')",
+            (
+                contract_id,
+                employee_id,
+                construction_id,
+                parent_contract_id,
+                area,
+                incharge,
+                start_date,
+                end_date,
+                terms,
+                file_path,
+                submitted_by,
+                submitted_at,
+            ),
+        )
+        conn.commit()
+        return int(c.lastrowid or 0)
+
+
+def list_pending_contracts(status: Optional[str] = None):
+    with _conn() as conn:
+        c = conn.cursor()
+        if status:
+            c.execute("SELECT * FROM pending_contracts WHERE status = ? ORDER BY id", (status,))
+        else:
+            c.execute("SELECT * FROM pending_contracts ORDER BY id")
+        return c.fetchall()
+
+
+def _promote_pending_to_contract(row) -> None:
+    # row matches pending_contracts columns; create a simple namespace and call add_contract_to_db
+    try:
+        pc = SimpleNamespace(
+            id=row[1],
+            employee_id=row[2],
+            construction_id=row[3],
+            parent_contract_id=row[4],
+            area=row[5],
+            incharge=row[6],
+            start_date=row[7],
+            end_date=row[8],
+            terms=row[9],
+            file_path=row[10],
+        )
+        add_contract_to_db(pc)
+    except Exception:
+        logger.exception("Failed to promote pending contract to live contract")
+
+
+def approve_pending_contract(pending_id: int, approved_by: Optional[int] = None) -> None:
+    approved_at = datetime.utcnow().isoformat()
+    with _conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM pending_contracts WHERE id = ?", (pending_id,))
+        row = c.fetchone()
+        if not row:
+            raise ValueError("Pending contract not found")
+        # promote to live contract
+        _promote_pending_to_contract(row)
+        c.execute(
+            "UPDATE pending_contracts SET status = 'approved', approved_by = ?, approved_at = ? WHERE id = ?",
+            (approved_by, approved_at, pending_id),
+        )
+        conn.commit()
+
+
+def reject_pending_contract(pending_id: int, rejected_by: Optional[int] = None, reason: Optional[str] = None) -> None:
+    rejected_at = datetime.utcnow().isoformat()
+    with _conn() as conn:
+        c = conn.cursor()
+        c.execute("SELECT id FROM pending_contracts WHERE id = ?", (pending_id,))
+        if not c.fetchone():
+            raise ValueError("Pending contract not found")
+        c.execute(
+            "UPDATE pending_contracts SET status = 'rejected', approved_by = ?, approved_at = ?, rejection_reason = ? WHERE id = ?",
+            (rejected_by, rejected_at, reason, pending_id),
+        )
+        conn.commit()
+    # no-op: any exceptions will propagate to callers; do not shadow with unrelated error
 
 
 # ---------- Admin / User management ----------

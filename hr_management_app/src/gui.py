@@ -13,6 +13,11 @@ from hr_management_app.src.database.database import (
     ALLOWED_ROLES,
     _conn,
     add_contract_to_db,
+    submit_pending_contract,
+    list_pending_contracts,
+    approve_pending_contract,
+    reject_pending_contract,
+    send_email,
     can_count_salary,
     can_delete,
     can_edit_info,
@@ -742,6 +747,13 @@ class HRApp(tk.Tk):
         ttk.Button(
             btn_frame, text="Add Subcontract", command=self.prefill_add_subcontract
         ).pack(side="left", padx=5)
+        # Pending approvals manager (visible to manager and above)
+        self.pending_approvals_btn = ttk.Button(
+            btn_frame, text="Pending Approvals", command=self.open_pending_contracts
+        )
+        self.pending_approvals_btn.pack(side="left", padx=5)
+        if self.user_role not in ("admin", "high_manager", "manager"):
+            self.pending_approvals_btn.config(state="disabled")
 
         right_frame = ttk.Frame(self, padding=10)
         right_frame.place(x=440, y=10, width=450, height=540)
@@ -823,8 +835,7 @@ class HRApp(tk.Tk):
         )
         self.add_contract_btn.grid(row=6, column=0, columnspan=2, pady=(8, 0))
 
-        if self.user_role not in ("admin", "high_manager"):
-            self.add_contract_btn.config(state="disabled")
+        # Allow most roles to submit contracts. Only hide for clearly restricted roles.
         if self.user_role in ("driver", "construction_worker"):
             # visually hide the add contract section for restricted roles
             add_frame.pack_forget()
@@ -924,12 +935,27 @@ class HRApp(tk.Tk):
             self.check_btn.config(state="disabled")
             return
         open_session = has_open_session(int(self.employee_id))
-        self.check_status_lbl.config(
-            text=("Open session" if open_session else "Not checked in")
-        )
-        self.check_btn.config(
-            text=("Check Out" if open_session else "Check In"), state="normal"
-        )
+        checked_out_today = False
+        try:
+            from hr_management_app.src.database.database import has_checked_out_today
+
+            checked_out_today = has_checked_out_today(int(self.employee_id))
+        except Exception:
+            # best-effort: if helper unavailable, don't block UX
+            checked_out_today = False
+
+        if open_session:
+            # user currently checked in and can check out unless already checked out today
+            if checked_out_today:
+                self.check_status_lbl.config(text=("Checked out today"))
+                self.check_btn.config(text=("Check Out"), state="disabled")
+            else:
+                self.check_status_lbl.config(text=("Open session"))
+                self.check_btn.config(text=("Check Out"), state="normal")
+        else:
+            # not checked in; allow check-in
+            self.check_status_lbl.config(text=("Not checked in"))
+            self.check_btn.config(text=("Check In"), state="normal")
 
     def open_own_profile(self):
         if not self.employee_id or not self.employee:
@@ -1617,6 +1643,100 @@ class HRApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
+    def open_pending_contracts(self, focus_pending_id: Optional[int] = None):
+        # Show a window listing pending contract submissions with Approve/Reject actions.
+        win = tk.Toplevel(self)
+        win.title("Pending Contracts")
+        win.geometry("840x420")
+        frm = ttk.Frame(win, padding=8)
+        frm.pack(fill="both", expand=True)
+
+        cols = (
+            "id",
+            "contract_id",
+            "employee_id",
+            "construction_id",
+            "parent_contract_id",
+            "area",
+            "incharge",
+            "start_date",
+            "end_date",
+            "submitted_by",
+            "submitted_at",
+            "status",
+        )
+        tree = ttk.Treeview(frm, columns=cols, show="headings")
+        for c in cols:
+            tree.heading(c, text=c.replace("_", " ").title())
+            tree.column(c, anchor="center")
+        tree.pack(fill="both", expand=True)
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(6, 0))
+        ttk.Button(btns, text="Refresh", command=lambda: self._load_pending(tree)).pack(side="left")
+        ttk.Button(btns, text="Approve Selected", command=lambda: self._approve_selected_pending(tree)).pack(side="left", padx=4)
+        ttk.Button(btns, text="Reject Selected", command=lambda: self._reject_selected_pending(tree)).pack(side="left", padx=4)
+        ttk.Button(btns, text="Close", command=win.destroy).pack(side="right")
+
+        # load pending rows and optionally focus a specific pending id
+        self._load_pending(tree, focus_pending_id=focus_pending_id)
+
+    def _load_pending(self, tree, focus_pending_id: Optional[int] = None):
+        for i in tree.get_children():
+            tree.delete(i)
+        try:
+            rows = list_pending_contracts(status="pending")
+            for r in rows:
+                # expected DB row: id, contract_id, employee_id, construction_id, parent_contract_id, area, incharge, start_date, end_date, terms, file_path, submitted_by, submitted_at, status, approved_by, approved_at, rejection_reason
+                tree.insert("", "end", values=(
+                    r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[11] if len(r) > 11 else None, r[12] if len(r) > 12 else None, r[13] if len(r) > 13 else None
+                ))
+            # if requested, focus/select the newly submitted pending item
+            if focus_pending_id is not None:
+                try:
+                    for item in tree.get_children():
+                        vals = tree.item(item, "values") or []
+                        if len(vals) > 0 and int(vals[0]) == int(focus_pending_id):
+                            tree.selection_set(item)
+                            tree.see(item)
+                            break
+                except Exception:
+                    pass
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load pending contracts: {e}")
+
+    def _approve_selected_pending(self, tree):
+        sel = tree.selection()
+        if not sel:
+            messagebox.showinfo("Select", "Select one or more pending items to approve")
+            return
+        ids = [int(tree.item(s)["values"][0]) for s in sel]
+        try:
+            for pid in ids:
+                approve_pending_contract(pid, approved_by=(int(self.user_id) if self.user_id is not None else None))
+            messagebox.showinfo("Approved", "Selected pending contracts approved")
+            self._load_pending(tree)
+            self.load_contracts()
+        except Exception as e:
+            logger.exception("Failed to approve pending: %s", e)
+            messagebox.showerror("Error", str(e))
+
+    def _reject_selected_pending(self, tree):
+        sel = tree.selection()
+        if not sel:
+            messagebox.showinfo("Select", "Select one or more pending items to reject")
+            return
+        ids = [int(tree.item(s)["values"][0]) for s in sel]
+        reason = simpledialog.askstring("Rejection Reason", "Reason for rejection (optional):", parent=self)
+        try:
+            for pid in ids:
+                reject_pending_contract(pid, rejected_by=(int(self.user_id) if self.user_id is not None else None), reason=reason)
+            messagebox.showinfo("Rejected", "Selected pending contracts rejected")
+            self._load_pending(tree)
+        except Exception as e:
+            logger.exception("Failed to reject pending: %s", e)
+            messagebox.showerror("Error", str(e))
+
     def view_selected_contract(self):
         # support both tree and list selection
         cid = None
@@ -1724,6 +1844,7 @@ class HRApp(tk.Tk):
                     )
                     return
 
+            # Build a simple namespace to pass to DB helpers or to store as pending
             c = SimpleNamespace(
                 id=cid,
                 employee_id=None,
@@ -1736,10 +1857,73 @@ class HRApp(tk.Tk):
                 terms=terms,
                 file_path=stored_path,
             )
-            add_contract_to_db(c)
-            messagebox.showinfo("Success", "Contract added.", parent=self)
-            self.clear_add_fields()
-            self.load_contracts()
+
+            # Management-level users may add contracts directly. Others submit as pending.
+            if self.user_role in ("admin", "high_manager", "manager"):
+                add_contract_to_db(c)
+                messagebox.showinfo("Success", "Contract added.", parent=self)
+                self.clear_add_fields()
+                self.load_contracts()
+            else:
+                # enqueue as pending for manager+ approval
+                try:
+                    pending_id = submit_pending_contract(
+                        contract_id=cid,
+                        employee_id=None,
+                        construction_id=eid,
+                        parent_contract_id=parent_id,
+                        area=(self.entry_area.get().strip() or None),
+                        incharge=(self.entry_incharge.get().strip() or None),
+                        start_date=start_iso,
+                        end_date=end_iso,
+                        terms=terms,
+                        file_path=stored_path,
+                        submitted_by=(int(self.user_id) if self.user_id is not None else None),
+                    )
+                    if pending_id:
+                        messagebox.showinfo(
+                            "Submitted",
+                            f"Contract submitted for approval by management. Reference ID: {pending_id}",
+                            parent=self,
+                        )
+                    else:
+                        messagebox.showinfo(
+                            "Submitted",
+                            "Contract submitted for approval by management.",
+                            parent=self,
+                        )
+                    # Attempt to send a small confirmation email to the submitter if we have a user id and email
+                    try:
+                        if self.user_id is not None:
+                            user = get_user_by_id(int(self.user_id))
+                            if user and len(user) > 1 and user[1]:
+                                to_addr = user[1]
+                                subj = f"Contract submission received — ref {pending_id}"
+                                body = (
+                                    f"Hello,\n\nYour contract submission (reference {pending_id}) has been received and is pending approval by management.\n\n"
+                                    "You will be notified when a decision has been made.\n\nRegards,\nHR Management"
+                                )
+                                try:
+                                    send_email(to_addr, subj, body)
+                                except Exception:
+                                    logger.exception("Failed to send pending-submission confirmation to %s", to_addr)
+                    except Exception:
+                        logger.exception("Failed to lookup submitter email for pending confirmation")
+                    # in-app transient notification so submitter sees immediate feedback (best-effort)
+                    try:
+                        # show a small toast notification in the app, with action to open the pending manager
+                        self._show_notification(f"Contract submitted — ref {pending_id}", pending_id=pending_id)
+                    except Exception:
+                        # non-fatal; continue
+                        pass
+                    self.clear_add_fields()
+                except Exception as exc:
+                    logger.exception("Failed to submit pending contract: %s", exc)
+                    messagebox.showerror(
+                        "Error",
+                        f"Failed to submit contract for approval: {exc}",
+                        parent=self,
+                    )
         except Exception as e:
             messagebox.showerror("Error adding contract", str(e))
 
@@ -1769,7 +1953,8 @@ class HRApp(tk.Tk):
                 self.contract_file_path_var.set(path)
         except Exception as e:
             try:
-                messagebox.showerror("File select", str(e), parent=parent)
+                # ensure we pass a concrete parent (self) when parent is None to satisfy type checkers
+                messagebox.showerror("File select", str(e), parent=(parent or self))
             except Exception:
                 messagebox.showerror("File select", str(e))
 
@@ -1778,6 +1963,19 @@ class HRApp(tk.Tk):
             messagebox.showinfo("No employee", "No employee selected", parent=self)
             return
         if has_open_session(int(self.employee_id)):
+            # Prevent multiple check-outs in the same UTC day
+            try:
+                from hr_management_app.src.database.database import has_checked_out_today
+
+                if has_checked_out_today(int(self.employee_id)):
+                    messagebox.showinfo(
+                        "Already checked out", "You have already checked out today.", parent=self
+                    )
+                    self.update_check_state()
+                    return
+            except Exception:
+                pass
+
             out = record_check_out(int(self.employee_id))
             if out:
                 messagebox.showinfo("Checked out", f"Checked out at {out}", parent=self)
@@ -1820,6 +2018,53 @@ class HRApp(tk.Tk):
             self.month_result.config(text=f"Hours: {hours:.2f}  Salary: {salary:.2f}")
         except Exception as e:
             messagebox.showerror("Error", str(e), parent=self)
+
+    def _show_notification(self, message: str, timeout: int = 4, pending_id: Optional[int] = None):
+        """Show a small transient toast notification in the app (best-effort).
+        If pending_id is provided, display an "Open Pending" button that opens the
+        Pending Contracts window focused on that id.
+        """
+        try:
+            toast = tk.Toplevel(self)
+            toast.overrideredirect(True)
+            try:
+                toast.attributes("topmost", True)
+            except Exception:
+                pass
+            frm = ttk.Frame(toast, padding=6, relief="raised", borderwidth=1)
+            frm.pack(fill="both", expand=True)
+            lbl = ttk.Label(frm, text=message, anchor="w")
+            lbl.pack(side="left", fill="both", expand=True)
+
+            # optional action button for pending items
+            if pending_id is not None:
+                def _open_pending_and_close():
+                    try:
+                        self.open_pending_contracts(focus_pending_id=int(pending_id))
+                    except Exception:
+                        pass
+                    try:
+                        toast.destroy()
+                    except Exception:
+                        pass
+
+                btn = ttk.Button(frm, text="Open Pending", command=_open_pending_and_close)
+                btn.pack(side="right", padx=(6, 0))
+
+            # position near main window bottom-right
+            self.update_idletasks()
+            width = 320
+            height = 56
+            x = max(self.winfo_rootx() + self.winfo_width() - width - 12, 12)
+            y = max(self.winfo_rooty() + self.winfo_height() - height - 12, 12)
+            toast.geometry(f"{width}x{height}+{x}+{y}")
+
+            # auto-destroy after timeout seconds (only if no action button is present)
+            if pending_id is None:
+                toast.after(max(100, timeout * 1000), toast.destroy)
+        except Exception:
+            # swallow; notifications are optional
+            pass
 
     def center_window(self):
         self.update_idletasks()

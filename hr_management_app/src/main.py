@@ -1,15 +1,33 @@
 import logging
 import sys
+import os
 from typing import Optional
 
-from hr_management_app.src.contracts.models import Contract
-from hr_management_app.src.contracts.views import display_contracts
-from hr_management_app.src.database.database import (
-    add_contract_to_db,
-    calculate_salary,
-    get_all_contracts,
-    init_db,
-)
+# Import application modules. When running `python main.py` from inside
+# `hr_management_app/src` the top-level package `hr_management_app` may not be
+# on sys.path. Handle that case by adding the repo root to sys.path and
+# retrying the imports.
+try:
+    from hr_management_app.src.contracts.models import Contract
+    from hr_management_app.src.contracts.views import display_contracts
+    from hr_management_app.src.database.database import (
+        add_contract_to_db,
+        calculate_salary,
+        get_all_contracts,
+        init_db,
+    )
+except ModuleNotFoundError:
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    from hr_management_app.src.contracts.models import Contract
+    from hr_management_app.src.contracts.views import display_contracts
+    from hr_management_app.src.database.database import (
+        add_contract_to_db,
+        calculate_salary,
+        get_all_contracts,
+        init_db,
+    )
 
 logger = logging.getLogger(__name__)
 
