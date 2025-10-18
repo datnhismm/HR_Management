@@ -1,5 +1,7 @@
 # HR_Management
 
+![CI](https://github.com/datnhismm/HR_Management/actions/workflows/ci.yml/badge.svg)
+
 This repository contains the Human Resource Management application. The main application lives in the `hr_management_app/` folder.
 
 Quick links:

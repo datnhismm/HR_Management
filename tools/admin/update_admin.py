@@ -12,7 +12,7 @@ if not DB_PATH.exists():
     raise SystemExit("DB not found at: " + str(DB_PATH))
 
 # Backup DB
-ts = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
 backup_dir = Path("hr_management_app/src/db_backups") / f"pre_update_admin_{ts}"
 backup_dir.mkdir(parents=True, exist_ok=True)
 shutil.copy2(DB_PATH, backup_dir / "hr_management.db")

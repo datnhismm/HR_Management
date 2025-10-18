@@ -1054,7 +1054,7 @@ def send_email(to_email: str, subject: str, body: str) -> None:
             os.path.join(os.path.dirname(__file__), "..", "..", "outbox")
         )
         os.makedirs(outbox_dir, exist_ok=True)
-        fname = f"{datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex}.eml"
+        fname = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{uuid.uuid4().hex}.eml"
         outpath = os.path.join(outbox_dir, fname)
         try:
             with open(outpath, "w", encoding="utf-8") as fh:
@@ -1150,7 +1150,7 @@ def enqueue_email_outbox(
     last_error: Optional[str] = None,
 ) -> int:
     """Insert an email into the DB outbox and return the outbox row id."""
-    created_at = datetime.utcnow().isoformat()
+    created_at = datetime.now(timezone.utc).isoformat()
     status = 'failed' if mark_failed else 'pending'
     with _conn() as conn:
         c = conn.cursor()
@@ -1167,7 +1167,7 @@ def mark_outbox_sent(outbox_id: int) -> None:
         c = conn.cursor()
         c.execute(
             "UPDATE email_outbox SET status = 'sent', last_attempt_at = ?, attempt_count = attempt_count + 1 WHERE id = ?",
-            (datetime.utcnow().isoformat(), outbox_id),
+            (datetime.now(timezone.utc).isoformat(), outbox_id),
         )
         conn.commit()
 
@@ -1177,7 +1177,7 @@ def mark_outbox_failed(outbox_id: int, last_error: Optional[str] = None) -> None
         c = conn.cursor()
         c.execute(
             "UPDATE email_outbox SET status = 'failed', last_error = ?, last_attempt_at = ?, attempt_count = attempt_count + 1 WHERE id = ?",
-            (last_error, datetime.utcnow().isoformat(), outbox_id),
+            (last_error, datetime.now(timezone.utc).isoformat(), outbox_id),
         )
         conn.commit()
 
@@ -1585,7 +1585,7 @@ def submit_pending_contract(
     file_path: Optional[str],
     submitted_by: Optional[int] = None,
 ) -> int:
-    submitted_at = datetime.utcnow().isoformat()
+    submitted_at = datetime.now(timezone.utc).isoformat()
     with _conn() as conn:
         c = conn.cursor()
         c.execute(
@@ -1640,7 +1640,7 @@ def _promote_pending_to_contract(row) -> None:
 
 
 def approve_pending_contract(pending_id: int, approved_by: Optional[int] = None) -> None:
-    approved_at = datetime.utcnow().isoformat()
+    approved_at = datetime.now(timezone.utc).isoformat()
     with _conn() as conn:
         c = conn.cursor()
         c.execute("SELECT * FROM pending_contracts WHERE id = ?", (pending_id,))
@@ -1657,7 +1657,7 @@ def approve_pending_contract(pending_id: int, approved_by: Optional[int] = None)
 
 
 def reject_pending_contract(pending_id: int, rejected_by: Optional[int] = None, reason: Optional[str] = None) -> None:
-    rejected_at = datetime.utcnow().isoformat()
+    rejected_at = datetime.now(timezone.utc).isoformat()
     with _conn() as conn:
         c = conn.cursor()
         c.execute("SELECT id FROM pending_contracts WHERE id = ?", (pending_id,))

@@ -20,7 +20,7 @@ DB = (
     else "hr_management_app/src/database/hr_management.db"
 )
 # backup
-ts = datetime.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
 backup_dir = os.path.join("hr_management_app", "src", "db_backups", f"pre_fix_pwd_{ts}")
 os.makedirs(backup_dir, exist_ok=True)
 shutil.copy2(
